@@ -97,17 +97,15 @@ where
     fn consume(&mut self) -> Result<(), LexError> {
         let mut check_for_minus = false;
         if let Some(current) = self.current_char() {
-            match current {
-                c if c.is_alphabetic() => {
-                    let s = self.lex_word()?;
-                    self.emit(s)
-                }
-                c if self.is_number_start(c, self.peek()) => {
-                    check_for_minus = true;
-                    let s = self.lex_number()?;
-                    self.emit(s);
-                }
-                c => self.consume_char(c)?,
+            if current.is_alphabetic(){
+                let s = self.lex_word()?;
+                self.emit(s)
+            } else if self.is_number_start(current, self.peek()) {
+                check_for_minus = true;
+                let s = self.lex_number()?;
+                self.emit(s);
+            } else {
+                self.consume_char(current)?
             }
 
             if check_for_minus {
