@@ -1,6 +1,7 @@
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum LexErrorType {
     BadStringEscape,
+    UnfinishedDotAccess,
     UnexpectedStringEnd,
     UnexpectedEof,
     UnrecognizedToken(char)

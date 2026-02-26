@@ -2,46 +2,64 @@ use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Token {
-    Word(String),
-    String(String),  // string or "string"
-    Integer(String), // 67
-    Float(String),   // 3.14
+    EOF,
+
+    /// Alphanumeric identifier that is either used in a function lookup or as a string value.
+    ///
+    /// For example, for command: ';top Slay'
+    /// 'Slay' is not a known identifier and therefore, is treated as a string.
+    /// 'top' is known to our interpreter, so it is treated as a function call with 'Slay' being its argument.
+    Ident(String),
+
+    Str(String),   // Alphanumeric sequence of characters between quotes
+    Int(String),   // Integer number
+    Float(String), // Floating point number
 
     // Keywords
-    Filter, // filter
-    Sort,   // sort
-    Take,   // take
-    Map,    // map
-    Or,     // or
-    And,    // and
-    In,     // in
-    Not,    // not
-    True,   // true
-    False,  // false
+    Filter, // 'filter'
+    Sort,   // 'sort'
+    Count,  // 'count'
+    Take,   // 'take'
+    Map,    // 'map'
+    It,     // 'it'
 
-    Eq, // =
-    Ne, // !=
-    Gt, // >
-    Lt, // <
-    Ge, // >=
-    Le, // <=
+    // Logical operators
+    Or,    // 'or'
+    And,   // 'and'
+    In,    // 'in'
+    Not,   // '!' OR 'not'
+    True,  // 'true'
+    False, // 'false'
 
-    LeftParen,  // (
-    RightParen, // )
-    LeftBrace,  // {
-    RightBrace, // }
-    Plus,       // +
-    Minus,      // -
-    Asterisk,   // *
-    Slash,      // /
-    Percent,    // %
-    Dot,        // .
-    Comma,      // ,
-    Semicolon,  // ;
-    MinusMinus, // --
-    GtGt,       // >>
+    // Comparison operators
+    Eq, // '='
+    Ne, // '!='
+    Gt, // '>'
+    Lt, // '<'
+    Ge, // '>='
+    Le, // '<='
 
-    EOF,
+    // Math operators
+    Add, // '+'
+    Sub, // '-'
+    Mul, // '*'
+    Div, // '/'
+    Mod, // '%'
+
+    // Vectors
+    LeftParen,  // '('
+    RightParen, // ')'
+
+    // Independent scope
+    LeftBrace,  // '{'
+    RightBrace, // '}'
+
+    GtGt,      // '>>' pipes result of a previous step into another
+    Dot,       // '.' field access
+    Comma,     // ',' optional separator for vector elements
+    Semicolon, // ';' command flag
+    AddAdd,    // '++' used for appending/prepending to vector or concatenating vectors
+    SubSub,    // '--' option flag
 }
 
 impl Token {
@@ -49,8 +67,10 @@ impl Token {
         match s {
             "filter" => Some(Token::Filter),
             "sort" => Some(Token::Sort),
+            "count" => Some(Token::Count),
             "take" => Some(Token::Take),
             "map" => Some(Token::Map),
+            "it" => Some(Token::It),
             "or" => Some(Token::Or),
             "and" => Some(Token::And),
             "in" => Some(Token::In),
@@ -82,11 +102,13 @@ impl Token {
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-            Token::Word(s) | Token::String(s) | Token::Integer(s) | Token::Float(s) => s.as_str(),
+            Token::Ident(s) | Token::Str(s) | Token::Int(s) | Token::Float(s) => s.as_str(),
             Token::Filter => "filter",
             Token::Sort => "sort",
+            Token::Count => "count",
             Token::Take => "take",
             Token::Map => "map",
+            Token::It => "it",
             Token::Eq => "=",
             Token::Ne => "!=",
             Token::Gt => ">",
@@ -103,15 +125,16 @@ impl fmt::Display for Token {
             Token::RightParen => ")",
             Token::LeftBrace => "{",
             Token::RightBrace => "}",
-            Token::Plus => "+",
-            Token::Minus => "-",
-            Token::Asterisk => "*",
-            Token::Slash => "/",
-            Token::Percent => "%",
+            Token::Add => "+",
+            Token::Sub => "-",
+            Token::Mul => "*",
+            Token::Div => "/",
+            Token::Mod => "%",
             Token::Dot => ".",
             Token::Comma => ",",
             Token::Semicolon => ";",
-            Token::MinusMinus => "--",
+            Token::AddAdd => "++",
+            Token::SubSub => "--",
             Token::GtGt => ">>",
             Token::EOF => "EOF",
         };

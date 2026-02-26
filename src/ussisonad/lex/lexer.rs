@@ -1,61 +1,12 @@
-use crate::ussisonad::error::{LexError, LexErrorType, SrcSpan};
-use crate::ussisonad::token::Token;
+use crate::ussisonad::lex::error::{LexError, LexErrorType, SrcSpan};
+use crate::ussisonad::lex::token::Token;
 
 pub type Spanned = (Token, usize, usize);
 pub type LexResult = Result<Spanned, LexError>;
 
 pub fn make_tokenizer(source: &str) -> impl Iterator<Item = LexResult> + '_ {
     let chars = source.char_indices().map(|(i, c)| (c, i));
-    let char_iter = CharIterator::new(chars);
-    Lexer::new(char_iter)
-}
-
-pub struct CharIterator<T: Iterator<Item = (char, usize)>> {
-    source: T,
-    ch0: Option<(char, usize)>,
-    ch1: Option<(char, usize)>,
-}
-
-impl<T> CharIterator<T>
-where
-    T: Iterator<Item = (char, usize)>,
-{
-    pub fn new(source: T) -> Self {
-        let mut nlh = CharIterator {
-            source,
-            ch0: None,
-            ch1: None,
-        };
-        let _ = nlh.shift();
-        let _ = nlh.shift();
-        nlh
-    }
-
-    fn shift(&mut self) -> Option<(char, usize)> {
-        let result = self.ch0;
-        self.ch0 = self.ch1;
-        self.ch1 = self.source.next();
-        result
-    }
-}
-
-impl<T> Iterator for CharIterator<T>
-where
-    T: Iterator<Item = (char, usize)>,
-{
-    type Item = (char, usize);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(('\r', i)) = self.ch0 {
-            if let Some(('\n', _)) = self.ch1 {
-                let _ = self.shift();
-                self.ch0 = Some(('\n', i))
-            } else {
-                self.ch0 = Some(('\n', i))
-            }
-        }
-        self.shift()
-    }
+    Lexer::new(chars)
 }
 
 #[derive(Debug)]
@@ -66,6 +17,20 @@ pub struct Lexer<T: Iterator<Item = (char, usize)>> {
     ch1: Option<char>,
     loc0: usize,
     loc1: usize,
+}
+
+impl<T> Iterator for Lexer<T>
+where
+    T: Iterator<Item = (char, usize)>,
+{
+    type Item = LexResult;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.inner_next() {
+            Ok((Token::EOF, _, _)) => None,
+            other => Some(other),
+        }
+    }
 }
 
 impl<T> Lexer<T>
@@ -97,7 +62,7 @@ where
     fn consume(&mut self) -> Result<(), LexError> {
         let mut check_for_minus = false;
         if let Some(current) = self.current_char() {
-            if current.is_alphabetic(){
+            if current.is_alphabetic() {
                 let s = self.lex_word()?;
                 self.emit(s)
             } else if self.is_number_start(current, self.peek()) {
@@ -110,7 +75,7 @@ where
 
             if check_for_minus {
                 if Some('-') == self.ch0 && self.is_number_start('-', self.ch1) {
-                    self.emit_single_char(Token::Minus)?;
+                    self.emit_single_char(Token::Sub)?;
                 }
             }
         } else {
@@ -123,21 +88,50 @@ where
     fn consume_char(&mut self, c: char) -> Result<(), LexError> {
         match c {
             '=' => self.emit_single_char(Token::Eq)?,
-            '+' => self.emit_single_char(Token::Plus)?,
-            '*' => self.emit_single_char(Token::Asterisk)?,
-            '/' => self.emit_single_char(Token::Slash)?,
-            '%' => self.emit_single_char(Token::Percent)?,
+            '*' => self.emit_single_char(Token::Mul)?,
+            '/' => self.emit_single_char(Token::Div)?,
+            '%' => self.emit_single_char(Token::Mod)?,
             '(' => self.emit_single_char(Token::LeftParen)?,
             ')' => self.emit_single_char(Token::RightParen)?,
             '{' => self.emit_single_char(Token::LeftBrace)?,
             '}' => self.emit_single_char(Token::RightBrace)?,
             ',' => self.emit_single_char(Token::Comma)?,
-            '.' => self.emit_single_char(Token::Dot)?,
             ';' => self.emit_single_char(Token::Semicolon)?,
+            '.' => {
+                if let Some(next) = self.peek()
+                    && !next.is_whitespace()
+                {
+                    self.emit_single_char(Token::Dot)?
+                } else {
+                    let pos = self.pos();
+                    self.next_char();
+                    return Err(LexError {
+                        error: LexErrorType::UnfinishedDotAccess,
+                        location: SrcSpan {
+                            start: pos,
+                            end: pos,
+                        },
+                    });
+                }
+            }
             '"' => {
                 self.next_char();
                 let s = self.lex_string()?;
                 self.emit(s)
+            }
+            '+' => {
+                let tok_start = self.pos();
+                self.next_char();
+                match self.current_char() {
+                    Some('+') => {
+                        self.next_char();
+                        let tok_end = self.pos();
+                        self.emit((Token::AddAdd, tok_start, tok_end));
+                    }
+                    _ => {
+                        self.emit_single_char(Token::Add)?;
+                    }
+                }
             }
             '-' => {
                 let tok_start = self.pos();
@@ -146,11 +140,11 @@ where
                     Some('-') => {
                         self.next_char();
                         let tok_end = self.pos();
-                        self.emit((Token::MinusMinus, tok_start, tok_end));
+                        self.emit((Token::SubSub, tok_start, tok_end));
                     }
                     _ => {
                         let tok_end = self.pos();
-                        self.emit((Token::Minus, tok_start, tok_end));
+                        self.emit((Token::Sub, tok_start, tok_end));
                     }
                 }
             }
@@ -162,13 +156,7 @@ where
                     let tok_end = self.pos();
                     self.emit((Token::Ne, tok_start, tok_end));
                 } else {
-                    return Err(LexError {
-                        error: LexErrorType::UnrecognizedToken('!'),
-                        location: SrcSpan {
-                            start: tok_start,
-                            end: tok_start,
-                        },
-                    });
+                    self.emit((Token::Not, tok_start, tok_start));
                 }
             }
 
@@ -277,7 +265,7 @@ where
 
         match Token::keyword_from_str(content.as_str()) {
             Some(token) => Ok((token, start_pos, self.pos())),
-            None => Ok((Token::Word(content), start_pos, self.pos())),
+            None => Ok((Token::Ident(content), start_pos, self.pos())),
         }
     }
 
@@ -319,7 +307,7 @@ where
             }
         }
 
-        Ok((Token::String(content), start_pos, self.pos()))
+        Ok((Token::Str(content), start_pos, self.pos()))
     }
 
     fn lex_number(&mut self) -> LexResult {
@@ -351,11 +339,11 @@ where
         }
 
         if is_string {
-            Ok((Token::String(content), start_pos, self.pos()))
+            Ok((Token::Str(content), start_pos, self.pos()))
         } else if is_decimal {
             Ok((Token::Float(content), start_pos, self.pos()))
         } else {
-            Ok((Token::Integer(content), start_pos, self.pos()))
+            Ok((Token::Int(content), start_pos, self.pos()))
         }
     }
 
@@ -393,19 +381,5 @@ where
 
     fn emit(&mut self, spanned: Spanned) {
         self.pending.push(spanned);
-    }
-}
-
-impl<T> Iterator for Lexer<T>
-where
-    T: Iterator<Item = (char, usize)>,
-{
-    type Item = LexResult;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.inner_next() {
-            Ok((Token::EOF, _, _)) => None,
-            other => Some(other),
-        }
     }
 }
