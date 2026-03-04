@@ -1,4 +1,4 @@
-use crate::ussisonad::lex::error::{LexError, LexErrorType, SrcSpan};
+use crate::ussisonad::lex::error::{LexError, LexErrorType};
 use crate::ussisonad::lex::token::Token;
 
 pub type Spanned = (Token, usize, usize);
@@ -13,10 +13,10 @@ pub fn make_tokenizer(source: &str) -> impl Iterator<Item = LexResult> + '_ {
 pub struct Lexer<T: Iterator<Item = (char, usize)>> {
     chars: T,
     pending: Vec<Spanned>,
-    ch0: Option<char>,
-    ch1: Option<char>,
-    loc0: usize,
-    loc1: usize,
+    current: Option<char>,
+    peek: Option<char>,
+    current_pos: usize,
+    peek_pos: usize,
 }
 
 impl<T> Iterator for Lexer<T>
@@ -41,10 +41,10 @@ where
         let mut lexer = Self {
             chars: source,
             pending: Vec::new(),
-            ch0: None,
-            ch1: None,
-            loc0: 0,
-            loc1: 0,
+            current: None,
+            peek: None,
+            current_pos: 0,
+            peek_pos: 0,
         };
         let _ = lexer.next_char();
         let _ = lexer.next_char();
@@ -60,28 +60,27 @@ where
     }
 
     fn consume(&mut self) -> Result<(), LexError> {
-        let mut check_for_minus = false;
-        if let Some(current) = self.current_char() {
-            if current.is_alphabetic() {
+        match self.current {
+            Some(c) if c.is_alphabetic() => {
                 let s = self.lex_word()?;
                 self.emit(s)
-            } else if self.is_number_start(current, self.peek()) {
-                check_for_minus = true;
+            }
+            Some(c) if self.is_number_start(c, self.peek()) => {
                 let s = self.lex_number()?;
                 self.emit(s);
-            } else {
-                self.consume_char(current)?
-            }
 
-            if check_for_minus {
-                if Some('-') == self.ch0 && self.is_number_start('-', self.ch1) {
+                if Some('-') == self.current && self.is_number_start('-', self.peek) {
                     self.emit_single_char(Token::Sub)?;
                 }
             }
-        } else {
-            let eof_pos = self.pos();
-            self.emit((Token::EOF, eof_pos, eof_pos))
+            Some(c) => self.consume_char(c)?,
+            None => {
+                let pos = self.pos();
+                self.emit((Token::EOF, pos, pos));
+                return Ok(());
+            }
         }
+
         Ok(())
     }
 
@@ -107,10 +106,7 @@ where
                     self.next_char();
                     return Err(LexError {
                         error: LexErrorType::UnfinishedDotAccess,
-                        location: SrcSpan {
-                            start: pos,
-                            end: pos,
-                        },
+                        location: (pos, pos),
                     });
                 }
             }
@@ -122,7 +118,7 @@ where
             '+' => {
                 let tok_start = self.pos();
                 self.next_char();
-                match self.current_char() {
+                match self.current {
                     Some('+') => {
                         self.next_char();
                         let tok_end = self.pos();
@@ -136,7 +132,7 @@ where
             '-' => {
                 let tok_start = self.pos();
                 self.next_char();
-                match self.current_char() {
+                match self.current {
                     Some('-') => {
                         self.next_char();
                         let tok_end = self.pos();
@@ -151,7 +147,7 @@ where
             '!' => {
                 let tok_start = self.pos();
                 self.next_char();
-                if let Some('=') = self.current_char() {
+                if let Some('=') = self.current {
                     let _ = self.next_char();
                     let tok_end = self.pos();
                     self.emit((Token::Ne, tok_start, tok_end));
@@ -163,7 +159,7 @@ where
             '<' => {
                 let tok_start = self.pos();
                 self.next_char();
-                match self.current_char() {
+                match self.current {
                     Some('=') => {
                         self.next_char();
                         let tok_end = self.pos();
@@ -178,7 +174,7 @@ where
             '>' => {
                 let tok_start = self.pos();
                 self.next_char();
-                match self.current_char() {
+                match self.current {
                     Some('>') => {
                         self.next_char();
                         let tok_end = self.pos();
@@ -200,13 +196,10 @@ where
                 return Ok(());
             }
             c => {
-                let location = self.pos();
+                let pos = self.pos();
                 return Err(LexError {
                     error: LexErrorType::UnrecognizedToken(c),
-                    location: SrcSpan {
-                        start: location,
-                        end: location,
-                    },
+                    location: (pos, pos),
                 });
             }
         }
@@ -221,10 +214,7 @@ where
             Some(_) => Ok(self.emit((token, tok_start, self.pos()))),
             None => Err(LexError {
                 error: LexErrorType::UnexpectedEof,
-                location: SrcSpan {
-                    start: tok_start,
-                    end: self.pos(),
-                },
+                location: (tok_start, self.pos()),
             }),
         }
     }
@@ -255,7 +245,7 @@ where
         let mut content = String::new();
 
         loop {
-            match self.current_char() {
+            match self.current {
                 Some(c) if self.is_word_boundary(c) => break,
                 Some(c) => content.push(c),
                 None => break,
@@ -278,7 +268,7 @@ where
                 Some('"') => break,
                 Some('\\') => {
                     let slash_pos = self.pos() - 1;
-                    if let Some(c) = self.current_char()
+                    if let Some(c) = self.current
                         && matches!(c, 'f' | 'n' | 't' | 'r' | '"' | '\\')
                     {
                         self.next_char();
@@ -287,10 +277,7 @@ where
                     } else {
                         return Err(LexError {
                             error: LexErrorType::BadStringEscape,
-                            location: SrcSpan {
-                                start: slash_pos,
-                                end: self.pos(),
-                            },
+                            location: (slash_pos, self.pos()),
                         });
                     }
                 }
@@ -298,10 +285,7 @@ where
                 None => {
                     return Err(LexError {
                         error: LexErrorType::UnexpectedStringEnd,
-                        location: SrcSpan {
-                            start: start_pos,
-                            end: start_pos,
-                        },
+                        location: (start_pos, start_pos),
                     });
                 }
             }
@@ -316,13 +300,13 @@ where
         let mut is_decimal = false;
         let mut is_string = false;
 
-        if self.current_char() == Some('-') {
+        if self.current == Some('-') {
             content.push('-');
             self.next_char();
         }
 
         loop {
-            match self.current_char() {
+            match self.current {
                 Some('_') => continue,
                 Some('.') => {
                     is_decimal = true;
@@ -348,38 +332,400 @@ where
     }
 
     fn next_char(&mut self) -> Option<char> {
-        let c = self.ch0;
+        let c = self.current;
         let nxt = match self.chars.next() {
             Some((c, loc)) => {
-                self.loc0 = self.loc1;
-                self.loc1 = loc;
+                self.current_pos = self.peek_pos;
+                self.peek_pos = loc;
                 Some(c)
             }
             None => {
                 // EOF needs a single advance
-                self.loc0 = self.loc1;
-                self.loc1 += 1;
+                self.current_pos = self.peek_pos;
+                self.peek_pos += 1;
                 None
             }
         };
-        self.ch0 = self.ch1;
-        self.ch1 = nxt;
+        self.current = self.peek;
+        self.peek = nxt;
         c
     }
 
-    fn current_char(&self) -> Option<char> {
-        self.ch0
-    }
-
     fn peek(&self) -> Option<char> {
-        self.ch1
+        self.peek
     }
 
     fn pos(&self) -> usize {
-        self.loc0
+        self.current_pos
     }
 
     fn emit(&mut self, spanned: Spanned) {
         self.pending.push(spanned);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ussisonad::lex::error::{LexError, LexErrorType};
+    use crate::ussisonad::lex::lexer::make_tokenizer;
+    use crate::ussisonad::lex::token::Token;
+
+    macro_rules! assert_tokens {
+   ($src:expr, $($expected:expr),* $(,)?) => {
+        let tokens = tokenize_sequence($src);
+        let expected = vec![$($expected),*];
+        assert_eq!(
+            tokens.len(),
+            expected.len(),
+            "Token count mismatch for input: {}",
+            $src
+        );
+        for (i, (token, exp)) in tokens.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(token, exp, "Token mismatch at index {}: expected {:?}, got {:?}", i, exp, token);
+        }
+       ()
+    };
+}
+
+    macro_rules! assert_error {
+    ($src:expr, $($expected:expr),* $(,)?) => {
+        let errors = tokenize_error_sequence($src);
+        let expected = vec![$($expected),*];
+        assert_eq!(
+            errors.len(),
+            expected.len(),
+            "Error count mismatch for input: '{}'",
+            $src
+        );
+        for (i, (error, exp)) in errors.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(error, exp, "Error mismatch at index {}: expected {:?}, got {:?}", i, exp, error);
+        }
+        ()
+    };
+}
+
+    #[allow(dead_code)]
+    fn tokenize_sequence(source: &str) -> Vec<Token> {
+        make_tokenizer(source)
+            .map(|x| x.unwrap())
+            .map(|x| x.0)
+            .collect()
+    }
+
+    #[allow(dead_code)]
+    fn tokenize_error_sequence(source: &str) -> Vec<LexError> {
+        make_tokenizer(source)
+            .filter(|x| x.is_err())
+            .map(|x| x.unwrap_err())
+            .collect()
+    }
+
+    #[test]
+    fn flag() {
+        assert_tokens!(";top", Token::Semicolon, Token::Ident("top".to_string()));
+    }
+
+    #[test]
+    fn value_identifier() {
+        assert_tokens!(
+            ";top Slay",
+            Token::Semicolon,
+            Token::Ident("top".to_string()),
+            Token::Ident("Slay".to_string())
+        );
+    }
+
+    #[test]
+    fn value_string() {
+        assert_tokens!(
+            ";top \"Tiger Claw\"",
+            Token::Semicolon,
+            Token::Ident("top".to_string()),
+            Token::Str("Tiger Claw".to_string())
+        );
+    }
+
+    #[test]
+    fn value_array_with_commas() {
+        assert_tokens!(
+            ";top (Slay, \"Tiger Claw\")",
+            Token::Semicolon,
+            Token::Ident("top".to_string()),
+            Token::LeftParen,
+            Token::Ident("Slay".to_string()),
+            Token::Comma,
+            Token::Str("Tiger Claw".to_string()),
+            Token::RightParen,
+        );
+    }
+
+    #[test]
+    fn value_array_no_commas() {
+        assert_tokens!(
+            ";top (Slay Lotragon blourgh \"Tiger Claw\")",
+            Token::Semicolon,
+            Token::Ident("top".to_string()),
+            Token::LeftParen,
+            Token::Ident("Slay".to_string()),
+            Token::Ident("Lotragon".to_string()),
+            Token::Ident("blourgh".to_string()),
+            Token::Str("Tiger Claw".to_string()),
+            Token::RightParen,
+        );
+    }
+
+    #[test]
+    fn value_integer() {
+        assert_tokens!(
+            ";square 67",
+            Token::Semicolon,
+            Token::Ident("square".to_string()),
+            Token::Int("67".to_string()),
+        );
+    }
+
+    #[test]
+    fn value_negative_integer() {
+        assert_tokens!(
+            ";square -69",
+            Token::Semicolon,
+            Token::Ident("square".to_string()),
+            Token::Int("-69".to_string()),
+        );
+    }
+
+    #[test]
+    fn value_expr() {
+        assert_tokens!(
+            ";square 67 + 7.27",
+            Token::Semicolon,
+            Token::Ident("square".to_string()),
+            Token::Int("67".to_string()),
+            Token::Add,
+            Token::Float("7.27".to_string()),
+        );
+    }
+
+    #[test]
+    fn value_with_underscore() {
+        assert_tokens!(
+            ";top CreeperBro_2015",
+            Token::Semicolon,
+            Token::Ident("top".to_string()),
+            Token::Ident("CreeperBro_2015".to_string()),
+        );
+    }
+
+    #[test]
+    fn option_all_types() {
+        assert_tokens!(
+            ";top --limit 5 -mode standard -fc",
+            Token::Semicolon,
+            Token::Ident("top".to_string()),
+            Token::SubSub,
+            Token::Ident("limit".to_string()),
+            Token::Int("5".to_string()),
+            Token::Sub,
+            Token::Ident("mode".to_string()),
+            Token::Ident("standard".to_string()),
+            Token::Sub,
+            Token::Ident("fc".to_string()),
+        );
+    }
+
+    #[test]
+    fn options_with_value() {
+        assert_tokens!(
+            ";top Slay --limit 5 --mode standard",
+            Token::Semicolon,
+            Token::Ident("top".to_string()),
+            Token::Ident("Slay".to_string()),
+            Token::SubSub,
+            Token::Ident("limit".to_string()),
+            Token::Int("5".to_string()),
+            Token::SubSub,
+            Token::Ident("mode".to_string()),
+            Token::Ident("standard".to_string())
+        );
+    }
+
+    #[test]
+    fn error_unclosed_string_value() {
+        let s = ";top \"Tiger Claw";
+        let last_quote_pos = s.rfind('\"').unwrap() + 1;
+        assert_error!(
+            s,
+            LexError {
+                error: LexErrorType::UnexpectedStringEnd,
+                location: (last_quote_pos, last_quote_pos),
+            }
+        );
+    }
+
+    #[test]
+    fn dot_access() {
+        assert_tokens!(
+            ";top .some.value",
+            Token::Semicolon,
+            Token::Ident("top".to_string()),
+            Token::Dot,
+            Token::Ident("some".to_string()),
+            Token::Dot,
+            Token::Ident("value".to_string()),
+        );
+    }
+
+    #[test]
+    fn error_unfinished_dot_access() {
+        let s = ";top . --limit 5";
+        let err_idx = s.rfind('.').unwrap();
+        assert_error!(
+            s,
+            LexError {
+                error: LexErrorType::UnfinishedDotAccess,
+                location: (err_idx, err_idx)
+            }
+        );
+    }
+
+    #[test]
+    fn error_unfinished_dot_access_at_eof() {
+        let s = ";top .";
+        let err_idx = s.len() - 1;
+        assert_error!(
+            s,
+            LexError {
+                error: LexErrorType::UnfinishedDotAccess,
+                location: (err_idx, err_idx)
+            }
+        );
+    }
+
+    #[test]
+    fn with_one_pipe_no_expr() {
+        assert_tokens!(
+            ";top >> count",
+            Token::Semicolon,
+            Token::Ident("top".to_string()),
+            Token::GtGt,
+            Token::Count,
+        );
+    }
+
+    #[test]
+    fn one_pipe_with_expr() {
+        assert_tokens!(
+            ";top >> filter .bpm >= 250",
+            Token::Semicolon,
+            Token::Ident("top".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::Dot,
+            Token::Ident("bpm".to_string()),
+            Token::Ge,
+            Token::Int("250".to_string()),
+        );
+    }
+
+    #[test]
+    fn multiple_pipes_with_expr() {
+        assert_tokens!(
+            ";top chocomint >> filter .bpm >= 250 >> sort .acc --ascending",
+            Token::Semicolon,
+            Token::Ident("top".to_string()),
+            Token::Ident("chocomint".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::Dot,
+            Token::Ident("bpm".to_string()),
+            Token::Ge,
+            Token::Int("250".to_string()),
+            Token::GtGt,
+            Token::Sort,
+            Token::Dot,
+            Token::Ident("acc".to_string()),
+            Token::SubSub,
+            Token::Ident("ascending".to_string()),
+        );
+    }
+
+    #[test]
+    fn subcommand() {
+        assert_tokens!(
+            ";tops (Slay, Lotragon) ++ { top mrekk --server akatsuki } >> sort .bpm",
+            Token::Semicolon,
+            Token::Ident("tops".to_string()),
+            Token::LeftParen,
+            Token::Ident("Slay".to_string()),
+            Token::Comma,
+            Token::Ident("Lotragon".to_string()),
+            Token::RightParen,
+            Token::AddAdd,
+            Token::LeftBrace,
+            Token::Ident("top".to_string()),
+            Token::Ident("mrekk".to_string()),
+            Token::SubSub,
+            Token::Ident("server".to_string()),
+            Token::Ident("akatsuki".to_string()),
+            Token::RightBrace,
+            Token::GtGt,
+            Token::Sort,
+            Token::Dot,
+            Token::Ident("bpm".to_string()),
+        );
+    }
+
+    #[test]
+    fn logic() {
+        assert_tokens!(
+            ";top >> filter (.bpm >= 230 and HD in .mods) or .bpm >= 250",
+            Token::Semicolon,
+            Token::Ident("top".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::LeftParen,
+            Token::Dot,
+            Token::Ident("bpm".to_string()),
+            Token::Ge,
+            Token::Int("230".to_string()),
+            Token::And,
+            Token::Ident("HD".to_string()),
+            Token::In,
+            Token::Dot,
+            Token::Ident("mods".to_string()),
+            Token::RightParen,
+            Token::Or,
+            Token::Dot,
+            Token::Ident("bpm".to_string()),
+            Token::Ge,
+            Token::Int("250".to_string()),
+        );
+    }
+
+    #[test]
+    fn logic_with_subcommand() {
+        assert_tokens!(
+            ";top >> filter .title in { top blourgh >> map .title } or .acc > 98.5",
+            Token::Semicolon,
+            Token::Ident("top".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::Dot,
+            Token::Ident("title".to_string()),
+            Token::In,
+            Token::LeftBrace,
+            Token::Ident("top".to_string()),
+            Token::Ident("blourgh".to_string()),
+            Token::GtGt,
+            Token::Map,
+            Token::Dot,
+            Token::Ident("title".to_string()),
+            Token::RightBrace,
+            Token::Or,
+            Token::Dot,
+            Token::Ident("acc".to_string()),
+            Token::Gt,
+            Token::Float("98.5".to_string()),
+        );
     }
 }

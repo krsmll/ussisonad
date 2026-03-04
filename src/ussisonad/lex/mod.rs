@@ -1,4 +1,9 @@
-pub mod error;
-pub mod lexer;
-mod tests;
-pub mod token;
+mod error;
+mod lexer;
+mod token;
+
+pub(super) use self::{
+    error::{LexError},
+    lexer::{LexResult, Spanned, make_tokenizer},
+    token::{Token, }
+};

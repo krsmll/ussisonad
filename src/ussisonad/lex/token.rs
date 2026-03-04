@@ -80,23 +80,6 @@ impl Token {
             _ => None,
         }
     }
-
-    #[allow(dead_code)]
-    pub fn is_keyword(&self) -> bool {
-        matches!(
-            self,
-            Token::Filter
-                | Token::Sort
-                | Token::Take
-                | Token::Map
-                | Token::Or
-                | Token::And
-                | Token::In
-                | Token::Not
-                | Token::True
-                | Token::False
-        )
-    }
 }
 
 impl fmt::Display for Token {

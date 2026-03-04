@@ -10,11 +10,5 @@ pub enum LexErrorType {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct LexError {
     pub error: LexErrorType,
-    pub location: SrcSpan,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct SrcSpan {
-    pub start: usize,
-    pub end: usize,
+    pub location: (usize, usize),
 }

@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "kratt-rs"
+name = "ussisonad"
 version = "0.1.0"
