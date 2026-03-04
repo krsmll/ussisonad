@@ -69,7 +69,7 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         };
 
         loop {
-            let tok = match self.next() {
+            let tok = match self.peek() {
                 Some(span) => span,
                 None => break,
             };
@@ -92,9 +92,11 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
                 Token::GtGt => BinOp::Pipe,
                 Token::Dot => BinOp::Get,
                 Token::AddAdd => BinOp::Concat,
-                Token::RightParen | Token::RightBrace => break,
+                Token::RightParen => break,
                 _ => return Err(ParseError::UnsupportedOperator(tok.clone())),
             };
+
+            self.next();
 
             let (lbp, rbp) = op.bp();
             if lbp < min_bp {
