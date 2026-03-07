@@ -253,9 +253,9 @@ where
             self.next_char();
         }
 
-        match Token::keyword_from_str(content.as_str()) {
+        match Token::str_to_keyword(content.as_str()) {
             Some(token) => Ok((token, start_pos, self.pos())),
-            None => Ok((Token::Ident(content), start_pos, self.pos())),
+            None => Ok((Token::Str(content), start_pos, self.pos())),
         }
     }
 
@@ -422,7 +422,7 @@ mod tests {
 
     #[test]
     fn flag() {
-        assert_tokens!(";top", Token::Semicolon, Token::Ident("top".to_string()));
+        assert_tokens!(";top", Token::Semicolon, Token::Str("top".to_string()));
     }
 
     #[test]
@@ -430,8 +430,8 @@ mod tests {
         assert_tokens!(
             ";top Slay",
             Token::Semicolon,
-            Token::Ident("top".to_string()),
-            Token::Ident("Slay".to_string())
+            Token::Str("top".to_string()),
+            Token::Str("Slay".to_string())
         );
     }
 
@@ -440,7 +440,7 @@ mod tests {
         assert_tokens!(
             ";top \"Tiger Claw\"",
             Token::Semicolon,
-            Token::Ident("top".to_string()),
+            Token::Str("top".to_string()),
             Token::Str("Tiger Claw".to_string())
         );
     }
@@ -450,9 +450,9 @@ mod tests {
         assert_tokens!(
             ";top (Slay, \"Tiger Claw\")",
             Token::Semicolon,
-            Token::Ident("top".to_string()),
+            Token::Str("top".to_string()),
             Token::LeftParen,
-            Token::Ident("Slay".to_string()),
+            Token::Str("Slay".to_string()),
             Token::Comma,
             Token::Str("Tiger Claw".to_string()),
             Token::RightParen,
@@ -464,11 +464,11 @@ mod tests {
         assert_tokens!(
             ";top (Slay Lotragon blourgh \"Tiger Claw\")",
             Token::Semicolon,
-            Token::Ident("top".to_string()),
+            Token::Str("top".to_string()),
             Token::LeftParen,
-            Token::Ident("Slay".to_string()),
-            Token::Ident("Lotragon".to_string()),
-            Token::Ident("blourgh".to_string()),
+            Token::Str("Slay".to_string()),
+            Token::Str("Lotragon".to_string()),
+            Token::Str("blourgh".to_string()),
             Token::Str("Tiger Claw".to_string()),
             Token::RightParen,
         );
@@ -479,7 +479,7 @@ mod tests {
         assert_tokens!(
             ";square 67",
             Token::Semicolon,
-            Token::Ident("square".to_string()),
+            Token::Str("square".to_string()),
             Token::Int("67".to_string()),
         );
     }
@@ -489,7 +489,7 @@ mod tests {
         assert_tokens!(
             ";square -69",
             Token::Semicolon,
-            Token::Ident("square".to_string()),
+            Token::Str("square".to_string()),
             Token::Int("-69".to_string()),
         );
     }
@@ -499,7 +499,7 @@ mod tests {
         assert_tokens!(
             ";square 67 + 7.27",
             Token::Semicolon,
-            Token::Ident("square".to_string()),
+            Token::Str("square".to_string()),
             Token::Int("67".to_string()),
             Token::Add,
             Token::Float("7.27".to_string()),
@@ -511,8 +511,8 @@ mod tests {
         assert_tokens!(
             ";top CreeperBro_2015",
             Token::Semicolon,
-            Token::Ident("top".to_string()),
-            Token::Ident("CreeperBro_2015".to_string()),
+            Token::Str("top".to_string()),
+            Token::Str("CreeperBro_2015".to_string()),
         );
     }
 
@@ -521,15 +521,15 @@ mod tests {
         assert_tokens!(
             ";top --limit 5 -mode standard -fc",
             Token::Semicolon,
-            Token::Ident("top".to_string()),
+            Token::Str("top".to_string()),
             Token::SubSub,
-            Token::Ident("limit".to_string()),
+            Token::Str("limit".to_string()),
             Token::Int("5".to_string()),
             Token::Sub,
-            Token::Ident("mode".to_string()),
-            Token::Ident("standard".to_string()),
+            Token::Str("mode".to_string()),
+            Token::Str("standard".to_string()),
             Token::Sub,
-            Token::Ident("fc".to_string()),
+            Token::Str("fc".to_string()),
         );
     }
 
@@ -538,14 +538,14 @@ mod tests {
         assert_tokens!(
             ";top Slay --limit 5 --mode standard",
             Token::Semicolon,
-            Token::Ident("top".to_string()),
-            Token::Ident("Slay".to_string()),
+            Token::Str("top".to_string()),
+            Token::Str("Slay".to_string()),
             Token::SubSub,
-            Token::Ident("limit".to_string()),
+            Token::Str("limit".to_string()),
             Token::Int("5".to_string()),
             Token::SubSub,
-            Token::Ident("mode".to_string()),
-            Token::Ident("standard".to_string())
+            Token::Str("mode".to_string()),
+            Token::Str("standard".to_string())
         );
     }
 
@@ -567,11 +567,11 @@ mod tests {
         assert_tokens!(
             ";top .some.value",
             Token::Semicolon,
-            Token::Ident("top".to_string()),
+            Token::Str("top".to_string()),
             Token::Dot,
-            Token::Ident("some".to_string()),
+            Token::Str("some".to_string()),
             Token::Dot,
-            Token::Ident("value".to_string()),
+            Token::Str("value".to_string()),
         );
     }
 
@@ -606,7 +606,7 @@ mod tests {
         assert_tokens!(
             ";top >> count",
             Token::Semicolon,
-            Token::Ident("top".to_string()),
+            Token::Str("top".to_string()),
             Token::GtGt,
             Token::Count,
         );
@@ -617,11 +617,11 @@ mod tests {
         assert_tokens!(
             ";top >> filter .bpm >= 250",
             Token::Semicolon,
-            Token::Ident("top".to_string()),
+            Token::Str("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::Dot,
-            Token::Ident("bpm".to_string()),
+            Token::Str("bpm".to_string()),
             Token::Ge,
             Token::Int("250".to_string()),
         );
@@ -632,20 +632,20 @@ mod tests {
         assert_tokens!(
             ";top chocomint >> filter .bpm >= 250 >> sort .acc --ascending",
             Token::Semicolon,
-            Token::Ident("top".to_string()),
-            Token::Ident("chocomint".to_string()),
+            Token::Str("top".to_string()),
+            Token::Str("chocomint".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::Dot,
-            Token::Ident("bpm".to_string()),
+            Token::Str("bpm".to_string()),
             Token::Ge,
             Token::Int("250".to_string()),
             Token::GtGt,
             Token::Sort,
             Token::Dot,
-            Token::Ident("acc".to_string()),
+            Token::Str("acc".to_string()),
             Token::SubSub,
-            Token::Ident("ascending".to_string()),
+            Token::Str("ascending".to_string()),
         );
     }
 
@@ -654,24 +654,24 @@ mod tests {
         assert_tokens!(
             ";tops (Slay, Lotragon) ++ { top mrekk --server akatsuki } >> sort .bpm",
             Token::Semicolon,
-            Token::Ident("tops".to_string()),
+            Token::Str("tops".to_string()),
             Token::LeftParen,
-            Token::Ident("Slay".to_string()),
+            Token::Str("Slay".to_string()),
             Token::Comma,
-            Token::Ident("Lotragon".to_string()),
+            Token::Str("Lotragon".to_string()),
             Token::RightParen,
             Token::AddAdd,
             Token::LeftBrace,
-            Token::Ident("top".to_string()),
-            Token::Ident("mrekk".to_string()),
+            Token::Str("top".to_string()),
+            Token::Str("mrekk".to_string()),
             Token::SubSub,
-            Token::Ident("server".to_string()),
-            Token::Ident("akatsuki".to_string()),
+            Token::Str("server".to_string()),
+            Token::Str("akatsuki".to_string()),
             Token::RightBrace,
             Token::GtGt,
             Token::Sort,
             Token::Dot,
-            Token::Ident("bpm".to_string()),
+            Token::Str("bpm".to_string()),
         );
     }
 
@@ -680,23 +680,23 @@ mod tests {
         assert_tokens!(
             ";top >> filter (.bpm >= 230 and HD in .mods) or .bpm >= 250",
             Token::Semicolon,
-            Token::Ident("top".to_string()),
+            Token::Str("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::LeftParen,
             Token::Dot,
-            Token::Ident("bpm".to_string()),
+            Token::Str("bpm".to_string()),
             Token::Ge,
             Token::Int("230".to_string()),
             Token::And,
-            Token::Ident("HD".to_string()),
+            Token::Str("HD".to_string()),
             Token::In,
             Token::Dot,
-            Token::Ident("mods".to_string()),
+            Token::Str("mods".to_string()),
             Token::RightParen,
             Token::Or,
             Token::Dot,
-            Token::Ident("bpm".to_string()),
+            Token::Str("bpm".to_string()),
             Token::Ge,
             Token::Int("250".to_string()),
         );
@@ -707,23 +707,23 @@ mod tests {
         assert_tokens!(
             ";top >> filter .title in { top blourgh >> map .title } or .acc > 98.5",
             Token::Semicolon,
-            Token::Ident("top".to_string()),
+            Token::Str("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::Dot,
-            Token::Ident("title".to_string()),
+            Token::Str("title".to_string()),
             Token::In,
             Token::LeftBrace,
-            Token::Ident("top".to_string()),
-            Token::Ident("blourgh".to_string()),
+            Token::Str("top".to_string()),
+            Token::Str("blourgh".to_string()),
             Token::GtGt,
             Token::Map,
             Token::Dot,
-            Token::Ident("title".to_string()),
+            Token::Str("title".to_string()),
             Token::RightBrace,
             Token::Or,
             Token::Dot,
-            Token::Ident("acc".to_string()),
+            Token::Str("acc".to_string()),
             Token::Gt,
             Token::Float("98.5".to_string()),
         );

@@ -1,7 +1,10 @@
 use crate::ussisonad::lex::LexError;
 use crate::ussisonad::lex::Token;
 use crate::ussisonad::lex::{LexResult, Spanned};
-use crate::ussisonad::parse::ast::{BinOp, Expr};
+use crate::ussisonad::parse::ast::{
+    BinOp, BuiltinCommand, Command, CustomCommand, Expr, PipelineNode, SortDirection,
+};
+use std::collections::{HashMap, HashSet};
 use std::iter::Peekable;
 
 pub struct Parser<T: Iterator<Item = LexResult>> {
@@ -10,12 +13,29 @@ pub struct Parser<T: Iterator<Item = LexResult>> {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub enum ParseError {
+pub struct ParserError {
+    parsing_error: ParsingError,
+    lex_errors: Vec<LexError>,
+}
+
+impl ParserError {
+    fn new(parsing_error: ParsingError, lex_errors: Vec<LexError>) -> Self {
+        Self {
+            parsing_error,
+            lex_errors,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum ParsingError {
     UnexpectedToken(Spanned),
-    UnsupportedOperator(Spanned),
+    UnexpectedTokenWithContext(Token, Spanned),
+    ExpectedString(Spanned),
     IntParseError(Spanned),
     FloatParseError(Spanned),
     EmptyVector((usize, usize)),
+    PrematureEOF(Spanned),
     UnexpectedEOF,
 }
 
@@ -24,6 +44,278 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         Self {
             tokens: tokens.peekable(),
             lex_errors: Vec::new(),
+        }
+    }
+
+    pub fn parse(&mut self) -> Result<PipelineNode, ParserError> {
+        self.expect(Token::Semicolon)
+            .map_err(|err| ParserError::new(err, vec![]))?;
+
+        let node = self
+            .parse_pipeline()
+            .map_err(|err| ParserError::new(err, self.lex_errors.clone()))?;
+        match self.next() {
+            Some(span) => Err(ParserError::new(ParsingError::PrematureEOF(span), vec![])),
+            None => {
+                if self.lex_errors.is_empty() {
+                    Ok(node)
+                } else {
+                    Err(ParserError::new(ParsingError::UnexpectedEOF, vec![]))
+                }
+            }
+        }
+    }
+
+    fn parse_pipeline(&mut self) -> Result<PipelineNode, ParsingError> {
+        let left = self.parse_command()?;
+        let mut node = PipelineNode::Command(left);
+
+        loop {
+            if let Some(tok) = self.peek() {
+                match tok {
+                    Token::GtGt => {
+                        self.next();
+                        let rhs = self.parse_command()?;
+                        node = PipelineNode::Pipe {
+                            lhs: Box::new(node),
+                            rhs: Box::new(PipelineNode::Command(rhs)),
+                        };
+                    }
+                    Token::AddAdd => {
+                        self.next();
+                        let rhs = self.parse_command()?;
+                        node = PipelineNode::Concat {
+                            left: Box::new(node),
+                            right: Box::new(PipelineNode::Command(rhs)),
+                        };
+                    }
+                    _ => break,
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok(node)
+    }
+
+    fn parse_command(&mut self) -> Result<Command, ParsingError> {
+        match self.peek().ok_or(ParsingError::UnexpectedEOF)? {
+            Token::Filter => self.parse_filter(),
+            Token::Sort => self.parse_sort(),
+            Token::Take => self.parse_take(),
+            Token::Count => {
+                self.next();
+                Ok(Command::Builtin(BuiltinCommand::Count))
+            }
+            Token::Str(_) => self.parse_custom_command(),
+            _ => Err(ParsingError::UnexpectedToken(self.next().unwrap())),
+        }
+    }
+
+    fn parse_custom_command(&mut self) -> Result<Command, ParsingError> {
+        let name = self.expect_str()?;
+        let mut args = Vec::new();
+        let mut flags = HashSet::new();
+        let mut options = HashMap::new();
+
+        loop {
+            match self.peek() {
+                Some(Token::GtGt) | Some(Token::AddAdd) | Some(Token::EOF) | None => break,
+                Some(Token::SubSub) => {
+                    self.next();
+                    let key = self.expect_str()?;
+                    match self.peek() {
+                        Some(Token::Str(_))
+                        | Some(Token::Int(_))
+                        | Some(Token::Float(_))
+                        | Some(Token::Bool(_)) => {
+                            let val = self.parse_expr(0)?;
+                            options.insert(key, val);
+                        }
+                        _ => {
+                            flags.insert(key);
+                        }
+                    }
+                }
+                _ => {
+                    args.push(self.parse_expr(0)?);
+                }
+            }
+        }
+
+        let command = CustomCommand {
+            name,
+            args,
+            flags,
+            options,
+        };
+
+        Ok(Command::Custom(command))
+    }
+
+    fn parse_filter(&mut self) -> Result<Command, ParsingError> {
+        self.next();
+        let expr = self.parse_expr(0)?;
+        Ok(Command::Builtin(BuiltinCommand::Filter(expr)))
+    }
+
+    fn parse_sort(&mut self) -> Result<Command, ParsingError> {
+        self.next();
+        let field = self.parse_expr(0)?;
+        let direction = match self.peek() {
+            Some(Token::Str(s)) if s == "asc" => {
+                self.next();
+                SortDirection::Asc
+            }
+            Some(Token::Str(s)) if s == "desc" => {
+                self.next();
+                SortDirection::Desc
+            }
+            _ => SortDirection::Desc,
+        };
+        Ok(Command::Builtin(BuiltinCommand::Sort { field, direction }))
+    }
+
+    fn parse_take(&mut self) -> Result<Command, ParsingError> {
+        self.next();
+        let n = match self.next() {
+            Some((Token::Int(s), start, end)) => Self::parse_int(s, start, end)?,
+            Some(t) => return Err(ParsingError::UnexpectedToken(t)),
+            None => return Err(ParsingError::UnexpectedEOF),
+        };
+        Ok(Command::Builtin(BuiltinCommand::Limit(n as u64)))
+    }
+
+    fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, ParsingError> {
+        let (tok, start, end) = self.next().ok_or(ParsingError::UnexpectedEOF)?;
+
+        let mut lhs = match tok {
+            Token::Str(s) => Expr::Str(s),
+            Token::Bool(b) => Expr::Bool(b),
+            Token::Int(s) => self.parse_int_expr((Token::Int(s), start, end))?,
+            Token::Float(s) => self.parse_float_expr((Token::Float(s), start, end))?,
+            Token::Dot => self.parse_field_path()?,
+            Token::LeftParen => self.parse_group(start)?,
+            Token::Not => {
+                let rhs = self.parse_expr(80)?;
+                Expr::Not(Box::new(rhs))
+            }
+
+            tok => return Err(ParsingError::UnexpectedToken((tok, start, end))),
+        };
+
+        loop {
+            let (tok, _, _) = match self.peek_span() {
+                Some(span) => span,
+                None => break,
+            };
+
+            let op = match Self::token_to_binop(tok) {
+                Some(op) => op,
+                None => break,
+            };
+
+            let (left_bp, right_bp) = op.bp();
+            if left_bp < min_bp {
+                break;
+            }
+
+            self.next();
+
+            let rhs = self.parse_expr(right_bp)?;
+
+            lhs = Expr::Binary {
+                lhs: Box::new(lhs),
+                op,
+                rhs: Box::new(rhs),
+            };
+        }
+
+        Ok(lhs)
+    }
+
+    fn parse_field_path(&mut self) -> Result<Expr, ParsingError> {
+        let mut segments = Vec::new();
+        segments.push(self.expect_str()?);
+
+        while let Some((tok, _, _)) = self.peek_span()
+            && tok == &Token::Dot
+        {
+            self.next();
+            segments.push(self.expect_str()?);
+        }
+
+        Ok(Expr::FieldPath(segments))
+    }
+
+    fn parse_group(&mut self, left_paren_pos: usize) -> Result<Expr, ParsingError> {
+        let mut exprs: Vec<Expr> = Vec::new();
+
+        loop {
+            let (tok, pos, _) = self.peek_span().ok_or(ParsingError::UnexpectedEOF)?;
+            match tok {
+                Token::RightParen => {
+                    let expr = match exprs[..] {
+                        [] => return Err(ParsingError::EmptyVector((left_paren_pos, *pos))),
+                        [Expr::Binary { .. }] => exprs.pop().unwrap(),
+                        _ => Expr::Vector(exprs),
+                    };
+
+                    self.next();
+                    return Ok(expr);
+                }
+                Token::Comma => {
+                    self.next();
+                    continue;
+                }
+                _ => exprs.push(self.parse_expr(0)?),
+            }
+        }
+    }
+
+    fn parse_int_expr(&mut self, spanned: Spanned) -> Result<Expr, ParsingError> {
+        let (tok, start, end) = spanned;
+        match tok {
+            Token::Int(s) => Ok(Expr::Int(Self::parse_int(s, start, end)?)),
+            _ => Err(ParsingError::IntParseError((tok, start, end))),
+        }
+    }
+
+    fn parse_int(s: String, start: usize, end: usize) -> Result<i64, ParsingError> {
+        s.parse::<i64>()
+            .map_err(|_| ParsingError::IntParseError((Token::Int(s), start, end)))
+    }
+
+    fn parse_float_expr(&mut self, spanned: Spanned) -> Result<Expr, ParsingError> {
+        let (tok, start, end) = spanned;
+        match tok {
+            Token::Float(s) => s
+                .parse::<f64>()
+                .map(|f| Expr::Float(f))
+                .map_err(|_| ParsingError::FloatParseError((Token::Float(s), start, end))),
+            _ => Err(ParsingError::FloatParseError((tok, start, end))),
+        }
+    }
+
+    fn token_to_binop(token: &Token) -> Option<BinOp> {
+        match token {
+            Token::Add => Some(BinOp::Add),
+            Token::Sub => Some(BinOp::Sub),
+            Token::Mul => Some(BinOp::Mul),
+            Token::Div => Some(BinOp::Div),
+            Token::Mod => Some(BinOp::Mod),
+            Token::Eq => Some(BinOp::Eq),
+            Token::Ne => Some(BinOp::Ne),
+            Token::Gt => Some(BinOp::Gt),
+            Token::Lt => Some(BinOp::Lt),
+            Token::Ge => Some(BinOp::Ge),
+            Token::Le => Some(BinOp::Le),
+            Token::And => Some(BinOp::And),
+            Token::Or => Some(BinOp::Or),
+            Token::In => Some(BinOp::In),
+            Token::Contains => Some(BinOp::Contains),
+            _ => None,
         }
     }
 
@@ -40,7 +332,8 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
             None
         }
     }
-    fn peek(&mut self) -> Option<&Spanned> {
+
+    fn peek_span(&mut self) -> Option<&Spanned> {
         if let Some(peeked) = self.tokens.peek() {
             match peeked {
                 Ok(token) => Some(token),
@@ -54,113 +347,23 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         }
     }
 
-    fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
-        let (tok, start, end) = self.next().ok_or(ParseError::UnexpectedEOF)?;
-
-        let mut lhs = match tok {
-            Token::Int(s) => self.parse_int((Token::Int(s), start, end))?,
-            Token::Float(s) => self.parse_float((Token::Float(s), start, end))?,
-            Token::LeftParen => self.parse_vector(start)?,
-            Token::Dot => Expr::It,
-            Token::Ident(s) => Expr::Ident(s),
-            Token::Str(s) => Expr::Str(s),
-            Token::LeftBrace => todo!(),
-            _ => return Err(ParseError::UnexpectedToken((tok, start, end))),
-        };
-
-        loop {
-            let tok = match self.peek() {
-                Some(span) => span,
-                None => break,
-            };
-
-            let op = match tok.0 {
-                Token::Add => BinOp::Add,
-                Token::Sub => BinOp::Sub,
-                Token::Mul => BinOp::Mul,
-                Token::Div => BinOp::Div,
-                Token::Mod => BinOp::Mod,
-                Token::In => BinOp::In,
-                Token::Or => BinOp::Or,
-                Token::And => BinOp::And,
-                Token::Eq => BinOp::Eq,
-                Token::Ne => BinOp::Ne,
-                Token::Gt => BinOp::Gt,
-                Token::Lt => BinOp::Lt,
-                Token::Ge => BinOp::Ge,
-                Token::Le => BinOp::Le,
-                Token::GtGt => BinOp::Pipe,
-                Token::Dot => BinOp::Get,
-                Token::AddAdd => BinOp::Concat,
-                Token::RightParen => break,
-                _ => return Err(ParseError::UnsupportedOperator(tok.clone())),
-            };
-
-            self.next();
-
-            let (lbp, rbp) = op.bp();
-            if lbp < min_bp {
-                break;
-            }
-
-            let rhs = self.parse_expr(rbp)?;
-            lhs = Expr::Binary {
-                lhs: Box::new(lhs),
-                op,
-                rhs: Box::new(rhs),
-            }
-        }
-
-        Ok(lhs)
+    fn peek(&mut self) -> Option<&Token> {
+        self.peek_span().map(|span| &span.0)
     }
 
-    fn parse_vector(&mut self, left_paren_pos: usize) -> Result<Expr, ParseError> {
-        let mut exprs: Vec<Expr> = Vec::new();
-
-        loop {
-            if let Some((Token::RightParen, pos, _)) = self.peek() {
-                let expr = match exprs[..] {
-                    [] => return Err(ParseError::EmptyVector((left_paren_pos, *pos))),
-                    [Expr::Binary { .. }] => Ok(exprs.pop().unwrap()),
-                    _ => Ok(Expr::Vector(exprs, (left_paren_pos, *pos))),
-                };
-
-                self.next();
-                return expr;
-            }
-
-            let (tok, start, end) = self.peek().ok_or(ParseError::UnexpectedEOF)?;
-            match tok {
-                Token::Str(_)
-                | Token::Ident(_)
-                | Token::Int(_)
-                | Token::Float(_)
-                | Token::LeftBrace => exprs.push(self.parse_expr(0)?),
-                Token::Comma => continue,
-                tok => return Err(ParseError::UnexpectedToken((tok.clone(), *start, *end))),
-            }
+    fn expect(&mut self, expected: Token) -> Result<(), ParsingError> {
+        match self.next() {
+            Some((tok, _, _)) if tok == expected => Ok(()),
+            Some(actual) => Err(ParsingError::UnexpectedTokenWithContext(expected, actual)),
+            None => Err(ParsingError::UnexpectedEOF),
         }
     }
 
-    fn parse_int(&mut self, spanned: Spanned) -> Result<Expr, ParseError> {
-        let (tok, start, end) = spanned;
-        match tok {
-            Token::Int(s) => s
-                .parse::<i64>()
-                .map(|i| Expr::Int(i))
-                .map_err(|_| ParseError::IntParseError((Token::Int(s), start, end))),
-            _ => Err(ParseError::IntParseError((tok, start, end))),
-        }
-    }
-
-    fn parse_float(&mut self, spanned: Spanned) -> Result<Expr, ParseError> {
-        let (tok, start, end) = spanned;
-        match tok {
-            Token::Float(s) => s
-                .parse::<f64>()
-                .map(|f| Expr::Float(f))
-                .map_err(|_| ParseError::FloatParseError((Token::Float(s), start, end))),
-            _ => Err(ParseError::FloatParseError((tok, start, end))),
+    fn expect_str(&mut self) -> Result<String, ParsingError> {
+        match self.next() {
+            Some((Token::Str(s), _, _)) => Ok(s),
+            Some(actual) => Err(ParsingError::ExpectedString(actual)),
+            None => Err(ParsingError::UnexpectedEOF),
         }
     }
 }
@@ -168,20 +371,39 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
 #[cfg(test)]
 mod tests {
     use crate::ussisonad::lex::make_tokenizer;
-    use crate::ussisonad::parse::ast::{BinOp, Expr};
+    use crate::ussisonad::parse::ast::{
+        BinOp, BuiltinCommand, Command, CustomCommand, Expr, PipelineNode, SortDirection,
+    };
     use crate::ussisonad::parse::parser::Parser;
+    use std::collections::{HashMap, HashSet};
 
     macro_rules! assert_ast {
         ($src:expr, $expected:expr) => {
             let toks = make_tokenizer($src);
             let mut parser = Parser::new(toks);
-            let result = parser.parse_expr(0);
-
+            let result = parser.parse();
             assert_eq!(result, Ok($expected))
         };
     }
 
-    fn create_binary(lhs: Expr, op: BinOp, rhs: Expr) -> Expr {
+    fn cmd(c: Command) -> PipelineNode {
+        PipelineNode::Command(c)
+    }
+
+    fn custom(name: &str) -> Command {
+        Command::Custom(CustomCommand {
+            name: name.to_string(),
+            args: vec![],
+            flags: HashSet::new(),
+            options: HashMap::new(),
+        })
+    }
+
+    fn field(segments: &[&str]) -> Expr {
+        Expr::FieldPath(segments.iter().map(|s| s.to_string()).collect())
+    }
+
+    fn binary(lhs: Expr, op: BinOp, rhs: Expr) -> Expr {
         Expr::Binary {
             lhs: Box::new(lhs),
             op,
@@ -190,46 +412,562 @@ mod tests {
     }
 
     #[test]
-    fn binary_numbers() {
+    fn test_count() {
+        assert_ast!(";count", cmd(Command::Builtin(BuiltinCommand::Count)));
+    }
+
+    #[test]
+    fn test_take() {
+        assert_ast!(";take 10", cmd(Command::Builtin(BuiltinCommand::Limit(10))));
+    }
+
+    #[test]
+    fn test_sort_default_desc() {
         assert_ast!(
-            "6 + 7",
-            create_binary(Expr::Int(6), BinOp::Add, Expr::Int(7))
+            ";sort .bpm",
+            cmd(Command::Builtin(BuiltinCommand::Sort {
+                field: field(&["bpm"]),
+                direction: SortDirection::Desc,
+            }))
         );
     }
 
     #[test]
-    fn binary_numbers_with_two_ops() {
+    fn test_sort_asc() {
         assert_ast!(
-            "6 + 7 * 727",
-            create_binary(
-                Expr::Int(6),
-                BinOp::Add,
-                create_binary(Expr::Int(7), BinOp::Mul, Expr::Int(727))
-            )
+            ";sort .bpm asc",
+            cmd(Command::Builtin(BuiltinCommand::Sort {
+                field: field(&["bpm"]),
+                direction: SortDirection::Asc,
+            }))
         );
     }
 
     #[test]
-    fn binary_numbers_with_parentheses() {
+    fn test_sort_desc_explicit() {
         assert_ast!(
-            "(6 + 7 * 727) + 25",
-            create_binary(
-                create_binary(
-                    Expr::Int(6),
+            ";sort .bpm desc",
+            cmd(Command::Builtin(BuiltinCommand::Sort {
+                field: field(&["bpm"]),
+                direction: SortDirection::Desc,
+            }))
+        );
+    }
+
+    #[test]
+    fn test_order_keyword_alias() {
+        assert_ast!(
+            ";order .name asc",
+            cmd(Command::Builtin(BuiltinCommand::Sort {
+                field: field(&["name"]),
+                direction: SortDirection::Asc,
+            }))
+        );
+    }
+
+    #[test]
+    fn test_filter_eq() {
+        assert_ast!(
+            ";filter .rank = 1",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["rank"]),
+                BinOp::Eq,
+                Expr::Int(1),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_ne() {
+        assert_ast!(
+            ";filter .rank != 1",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["rank"]),
+                BinOp::Ne,
+                Expr::Int(1),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_gt() {
+        assert_ast!(
+            ";filter .score > 900",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["score"]),
+                BinOp::Gt,
+                Expr::Int(900),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_lt() {
+        assert_ast!(
+            ";filter .score < 100",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["score"]),
+                BinOp::Lt,
+                Expr::Int(100),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_ge() {
+        assert_ast!(
+            ";filter .bpm >= 200",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["bpm"]),
+                BinOp::Ge,
+                Expr::Int(200),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_le() {
+        assert_ast!(
+            ";filter .bpm <= 300",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["bpm"]),
+                BinOp::Le,
+                Expr::Int(300),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_above_keyword() {
+        assert_ast!(
+            ";filter .bpm above 200",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["bpm"]),
+                BinOp::Ge,
+                Expr::Int(200),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_below_keyword() {
+        assert_ast!(
+            ";filter .bpm below 300",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["bpm"]),
+                BinOp::Le,
+                Expr::Int(300),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_is_keyword() {
+        assert_ast!(
+            ";filter .status is active",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["status"]),
+                BinOp::Eq,
+                Expr::Str("active".to_string()),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_where_keyword_alias() {
+        assert_ast!(
+            ";where .age > 18",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["age"]),
+                BinOp::Gt,
+                Expr::Int(18),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_float() {
+        assert_ast!(
+            ";filter .acc > 98.5",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["acc"]),
+                BinOp::Gt,
+                Expr::Float(98.5),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_bool_true() {
+        assert_ast!(
+            ";filter .fc = true",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["fc"]),
+                BinOp::Eq,
+                Expr::Bool(true),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_bool_false() {
+        assert_ast!(
+            ";filter .ranked = false",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["ranked"]),
+                BinOp::Eq,
+                Expr::Bool(false),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_string_literal() {
+        assert_ast!(
+            ";filter .mode = osu",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["mode"]),
+                BinOp::Eq,
+                Expr::Str("osu".to_string()),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_contains() {
+        assert_ast!(
+            ";filter .title contains loved",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["title"]),
+                BinOp::Contains,
+                Expr::Str("loved".to_string()),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_in_vector() {
+        assert_ast!(
+            ";filter .status in (active, banned)",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["status"]),
+                BinOp::In,
+                Expr::Vector(vec![
+                    Expr::Str("active".to_string()),
+                    Expr::Str("banned".to_string()),
+                ]),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_in_field() {
+        assert_ast!(
+            ";filter HD in .mods",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                Expr::Str("HD".to_string()),
+                BinOp::In,
+                field(&["mods"]),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_and() {
+        assert_ast!(
+            ";filter .bpm > 200 and .acc > 95",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                binary(field(&["bpm"]), BinOp::Gt, Expr::Int(200)),
+                BinOp::And,
+                binary(field(&["acc"]), BinOp::Gt, Expr::Int(95)),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_or() {
+        assert_ast!(
+            ";filter .bpm > 250 or .acc > 99",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                binary(field(&["bpm"]), BinOp::Gt, Expr::Int(250)),
+                BinOp::Or,
+                binary(field(&["acc"]), BinOp::Gt, Expr::Int(99)),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_not() {
+        assert_ast!(
+            ";filter not .fc",
+            cmd(Command::Builtin(BuiltinCommand::Filter(Expr::Not(
+                Box::new(field(&["fc"])),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_not_binds_tighter_than_and() {
+        assert_ast!(
+            ";filter not .a and .b",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                Expr::Not(Box::new(field(&["a"]))),
+                BinOp::And,
+                field(&["b"]),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_nested_field_path() {
+        assert_ast!(
+            ";filter .user.age > 18",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["user", "age"]),
+                BinOp::Gt,
+                Expr::Int(18),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_grouped_binary_unwrapped() {
+        assert_ast!(
+            ";filter (.bpm > 200)",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["bpm"]),
+                BinOp::Gt,
+                Expr::Int(200),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_arithmetic_precedence() {
+        assert_ast!(
+            ";filter .score + 10 > 100",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                binary(field(&["score"]), BinOp::Add, Expr::Int(10)),
+                BinOp::Gt,
+                Expr::Int(100),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_mul_precedence_over_add() {
+        assert_ast!(
+            ";filter 2 + 3 * 4 > 0",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                binary(
+                    Expr::Int(2),
                     BinOp::Add,
-                    create_binary(Expr::Int(7), BinOp::Mul, Expr::Int(727)),
+                    binary(Expr::Int(3), BinOp::Mul, Expr::Int(4)),
                 ),
-                BinOp::Add,
-                Expr::Int(25)
-            )
+                BinOp::Gt,
+                Expr::Int(0),
+            ))))
         );
     }
 
     #[test]
-    fn binary_logic() {
+    fn test_custom_no_args() {
+        assert_ast!(";top", cmd(custom("top")));
+    }
+
+    #[test]
+    fn test_custom_with_string_arg() {
         assert_ast!(
-            "1 = 1",
-            create_binary(Expr::Int(1), BinOp::Eq, Expr::Int(1))
+            ";top chocomint",
+            cmd(Command::Custom(CustomCommand {
+                name: "top".to_string(),
+                args: vec![Expr::Str("chocomint".to_string())],
+                flags: HashSet::new(),
+                options: HashMap::new(),
+            }))
+        );
+    }
+
+    #[test]
+    fn test_custom_with_int_arg() {
+        assert_ast!(
+            ";recent 5",
+            cmd(Command::Custom(CustomCommand {
+                name: "recent".to_string(),
+                args: vec![Expr::Int(5)],
+                flags: HashSet::new(),
+                options: HashMap::new(),
+            }))
+        );
+    }
+
+    #[test]
+    fn test_custom_with_multiple_args() {
+        assert_ast!(
+            ";search hello 42",
+            cmd(Command::Custom(CustomCommand {
+                name: "search".to_string(),
+                args: vec![Expr::Str("hello".to_string()), Expr::Int(42)],
+                flags: HashSet::new(),
+                options: HashMap::new(),
+            }))
+        );
+    }
+
+    #[test]
+    fn test_custom_with_flag() {
+        assert_ast!(
+            ";top --global",
+            cmd(Command::Custom(CustomCommand {
+                name: "top".to_string(),
+                args: vec![],
+                flags: {
+                    let mut s = HashSet::new();
+                    s.insert("global".to_string());
+                    s
+                },
+                options: HashMap::new(),
+            }))
+        );
+    }
+
+    #[test]
+    fn test_custom_with_multiple_flags() {
+        assert_ast!(
+            ";top --global --recent",
+            cmd(Command::Custom(CustomCommand {
+                name: "top".to_string(),
+                args: vec![],
+                flags: ["global", "recent"].iter().map(|s| s.to_string()).collect(),
+                options: HashMap::new(),
+            }))
+        );
+    }
+
+    #[test]
+    fn test_custom_with_int_option() {
+        assert_ast!(
+            ";top --limit 10",
+            cmd(Command::Custom(CustomCommand {
+                name: "top".to_string(),
+                args: vec![],
+                flags: HashSet::new(),
+                options: [("limit".to_string(), Expr::Int(10))].into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn test_custom_with_string_option() {
+        assert_ast!(
+            ";top --mode standard",
+            cmd(Command::Custom(CustomCommand {
+                name: "top".to_string(),
+                args: vec![],
+                flags: HashSet::new(),
+                options: [("mode".to_string(), Expr::Str("standard".to_string()))].into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn test_custom_mixed_args_flags_options() {
+        assert_ast!(
+            ";top chocomint --global --limit 5",
+            cmd(Command::Custom(CustomCommand {
+                name: "top".to_string(),
+                args: vec![Expr::Str("chocomint".to_string())],
+                flags: {
+                    let mut s = HashSet::new();
+                    s.insert("global".to_string());
+                    s
+                },
+                options: [("limit".to_string(), Expr::Int(5))].into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn test_pipe() {
+        assert_ast!(
+            ";top >> count",
+            PipelineNode::Pipe {
+                lhs: Box::new(cmd(custom("top"))),
+                rhs: Box::new(cmd(Command::Builtin(BuiltinCommand::Count))),
+            }
+        );
+    }
+
+    #[test]
+    fn test_concat_with_keyword() {
+        assert_ast!(
+            ";top with recent",
+            PipelineNode::Concat {
+                left: Box::new(cmd(custom("top"))),
+                right: Box::new(cmd(custom("recent"))),
+            }
+        );
+    }
+
+    #[test]
+    fn test_concat_plusplus() {
+        assert_ast!(
+            ";top ++ recent",
+            PipelineNode::Concat {
+                left: Box::new(cmd(custom("top"))),
+                right: Box::new(cmd(custom("recent"))),
+            }
+        );
+    }
+
+    #[test]
+    fn test_chained_pipe_is_left_associative() {
+        assert_ast!(
+            ";top >> filter .bpm > 200 >> take 5",
+            PipelineNode::Pipe {
+                lhs: Box::new(PipelineNode::Pipe {
+                    lhs: Box::new(cmd(custom("top"))),
+                    rhs: Box::new(cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                        field(&["bpm"]),
+                        BinOp::Gt,
+                        Expr::Int(200),
+                    ))))),
+                }),
+                rhs: Box::new(cmd(Command::Builtin(BuiltinCommand::Limit(5)))),
+            }
+        );
+    }
+
+    #[test]
+    fn test_pipe_into_sort() {
+        assert_ast!(
+            ";top >> sort .bpm asc",
+            PipelineNode::Pipe {
+                lhs: Box::new(cmd(custom("top"))),
+                rhs: Box::new(cmd(Command::Builtin(BuiltinCommand::Sort {
+                    field: field(&["bpm"]),
+                    direction: SortDirection::Asc,
+                }))),
+            }
+        );
+    }
+
+    #[test]
+    fn test_filter_complex_predicate() {
+        assert_ast!(
+            ";top >> filter (.bpm >= 230 and HD in .mods) or .bpm >= 250",
+            PipelineNode::Pipe {
+                lhs: Box::new(cmd(custom("top"))),
+                rhs: Box::new(cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                    binary(
+                        binary(field(&["bpm"]), BinOp::Ge, Expr::Int(230)),
+                        BinOp::And,
+                        binary(Expr::Str("HD".to_string()), BinOp::In, field(&["mods"])),
+                    ),
+                    BinOp::Or,
+                    binary(field(&["bpm"]), BinOp::Ge, Expr::Int(250)),
+                ))))),
+            }
         );
     }
 }
