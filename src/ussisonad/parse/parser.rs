@@ -206,8 +206,8 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         };
 
         loop {
-            let (tok, _, _) = match self.peek_span() {
-                Some(span) => span,
+            let tok = match self.peek() {
+                Some(tok) => tok,
                 None => break,
             };
 
@@ -239,7 +239,7 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         let mut segments = Vec::new();
         segments.push(self.expect_str()?);
 
-        while let Some((tok, _, _)) = self.peek_span()
+        while let Some(tok) = self.peek()
             && tok == &Token::Dot
         {
             self.next();
