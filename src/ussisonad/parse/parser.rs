@@ -239,9 +239,7 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         let mut segments = Vec::new();
         segments.push(self.expect_str()?);
 
-        while let Some(tok) = self.peek()
-            && tok == &Token::Dot
-        {
+        while let Some(&Token::Dot) = self.peek() {
             self.next();
             segments.push(self.expect_str()?);
         }
