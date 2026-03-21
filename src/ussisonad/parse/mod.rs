@@ -1,3 +1,3 @@
-pub(super) mod ast;
-mod error;
-pub(super) mod parser;
+pub(crate) mod ast;
+pub(crate) mod error;
+pub(crate) mod parser;

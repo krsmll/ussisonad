@@ -1,5 +1,6 @@
 use crate::ussisonad::lex::error::{LexError, LexErrorType};
 use crate::ussisonad::lex::token::Token;
+use std::collections::VecDeque;
 
 pub type Spanned = (Token, usize, usize);
 pub type LexResult = Result<Spanned, LexError>;
@@ -12,7 +13,7 @@ pub fn make_tokenizer(source: &str) -> impl Iterator<Item = LexResult> + '_ {
 #[derive(Debug)]
 pub struct Lexer<T: Iterator<Item = (char, usize)>> {
     chars: T,
-    pending: Vec<Spanned>,
+    pending: VecDeque<Spanned>,
     current: Option<char>,
     peek: Option<char>,
     current_pos: usize,
@@ -27,7 +28,7 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.inner_next() {
-            Ok((Token::EOF, _, _)) => None,
+            Ok((Token::Eof, _, _)) => None,
             other => Some(other),
         }
     }
@@ -40,7 +41,7 @@ where
     pub fn new(source: T) -> Self {
         let mut lexer = Self {
             chars: source,
-            pending: Vec::new(),
+            pending: VecDeque::new(),
             current: None,
             peek: None,
             current_pos: 0,
@@ -56,27 +57,27 @@ where
             self.consume()?;
         }
 
-        Ok(self.pending.remove(0))
+        Ok(self.pending.pop_front().unwrap())
     }
 
     fn consume(&mut self) -> Result<(), LexError> {
         match self.current {
             Some(c) if c.is_alphabetic() => {
-                let s = self.lex_word()?;
-                self.emit(s)
+                let s = self.lex_word();
+                self.emit(s);
             }
-            Some(c) if self.is_number_start(c, self.peek()) => {
-                let s = self.lex_number()?;
+            Some(c) if Self::is_number_start(c, self.peek()) => {
+                let s = self.lex_number();
                 self.emit(s);
 
-                if Some('-') == self.current && self.is_number_start('-', self.peek) {
+                if Some('-') == self.current && Self::is_number_start('-', self.peek) {
                     self.emit_single_char(Token::Sub)?;
                 }
             }
             Some(c) => self.consume_char(c)?,
             None => {
                 let pos = self.pos();
-                self.emit((Token::EOF, pos, pos));
+                self.emit((Token::Eof, pos, pos));
                 return Ok(());
             }
         }
@@ -110,7 +111,7 @@ where
                 if let Some(next) = self.peek()
                     && !next.is_whitespace()
                 {
-                    self.emit_single_char(Token::Dot)?
+                    self.emit_single_char(Token::Dot)?;
                 } else {
                     let pos = self.pos();
                     self.next_char();
@@ -123,7 +124,7 @@ where
             '"' => {
                 self.next_char();
                 let s = self.lex_string()?;
-                self.emit(s)
+                self.emit(s);
             }
             '+' => {
                 let tok_start = self.pos();
@@ -142,16 +143,14 @@ where
             '-' => {
                 let tok_start = self.pos();
                 self.next_char();
-                match self.current {
-                    Some('-') => {
-                        self.next_char();
-                        let tok_end = self.pos();
-                        self.emit((Token::SubSub, tok_start, tok_end));
-                    }
-                    _ => {
-                        let tok_end = self.pos();
-                        self.emit((Token::Sub, tok_start, tok_end));
-                    }
+
+                if let Some('-') = self.current {
+                    self.next_char();
+                    let tok_end = self.pos();
+                    self.emit((Token::SubSub, tok_start, tok_end));
+                } else {
+                    let tok_end = self.pos();
+                    self.emit((Token::Sub, tok_start, tok_end));
                 }
             }
             '!' => {
@@ -169,16 +168,14 @@ where
             '<' => {
                 let tok_start = self.pos();
                 self.next_char();
-                match self.current {
-                    Some('=') => {
-                        self.next_char();
-                        let tok_end = self.pos();
-                        self.emit((Token::Le, tok_start, tok_end));
-                    }
-                    _ => {
-                        let tok_end = self.pos();
-                        self.emit((Token::Lt, tok_start, tok_end));
-                    }
+
+                if let Some('=') = self.current {
+                    self.next_char();
+                    let tok_end = self.pos();
+                    self.emit((Token::Le, tok_start, tok_end));
+                } else {
+                    let tok_end = self.pos();
+                    self.emit((Token::Lt, tok_start, tok_end));
                 }
             }
             '>' => {
@@ -222,7 +219,10 @@ where
         let tok_start = self.pos();
 
         match self.next_char() {
-            Some(_) => Ok(self.emit((token, tok_start, self.pos()))),
+            Some(_) => {
+                self.emit((token, tok_start, self.pos()));
+                Ok(())
+            }
             None => Err(LexError {
                 kind: LexErrorType::UnexpectedEof,
                 location: (tok_start, self.pos()),
@@ -230,7 +230,7 @@ where
         }
     }
 
-    fn is_number_start(&self, c: char, c1: Option<char>) -> bool {
+    fn is_number_start(c: char, c1: Option<char>) -> bool {
         match c {
             '0'..='9' => true,
             '-' => matches!(c1, Some('0'..='9')),
@@ -238,7 +238,7 @@ where
         }
     }
 
-    fn is_word_boundary(&self, c: char) -> bool {
+    fn is_word_boundary(c: char) -> bool {
         match c {
             '_' => false,
             _ => {
@@ -251,13 +251,13 @@ where
         }
     }
 
-    fn lex_word(&mut self) -> LexResult {
+    fn lex_word(&mut self) -> Spanned {
         let start_pos = self.pos();
         let mut content = String::new();
 
         loop {
             match self.current {
-                Some(c) if self.is_word_boundary(c) => break,
+                Some(c) if Self::is_word_boundary(c) => break,
                 Some(c) => content.push(c),
                 None => break,
             }
@@ -265,8 +265,8 @@ where
         }
 
         match Token::str_to_keyword(content.as_str()) {
-            Some(token) => Ok((token, start_pos, self.pos())),
-            None => Ok((Token::Str(content), start_pos, self.pos())),
+            Some(token) => (token, start_pos, self.pos()),
+            None => (Token::Str(content), start_pos, self.pos()),
         }
     }
 
@@ -312,7 +312,7 @@ where
         Ok((Token::Str(content), start_pos, self.pos()))
     }
 
-    fn lex_number(&mut self) -> LexResult {
+    fn lex_number(&mut self) -> Spanned {
         let start_pos = self.pos();
         let mut content = String::new();
         let mut is_decimal = false;
@@ -341,27 +341,24 @@ where
         }
 
         if is_string {
-            Ok((Token::Str(content), start_pos, self.pos()))
+            (Token::Str(content), start_pos, self.pos())
         } else if is_decimal {
-            Ok((Token::Float(content), start_pos, self.pos()))
+            (Token::Float(content), start_pos, self.pos())
         } else {
-            Ok((Token::Int(content), start_pos, self.pos()))
+            (Token::Int(content), start_pos, self.pos())
         }
     }
 
     fn next_char(&mut self) -> Option<char> {
         let c = self.current;
-        let nxt = match self.chars.next() {
-            Some((c, loc)) => {
-                self.current_pos = self.peek_pos;
-                self.peek_pos = loc;
-                Some(c)
-            }
-            None => {
-                self.current_pos = self.peek_pos;
-                self.peek_pos += 1;
-                None
-            }
+        let nxt = if let Some((c, loc)) = self.chars.next() {
+            self.current_pos = self.peek_pos;
+            self.peek_pos = loc;
+            Some(c)
+        } else {
+            self.current_pos = self.peek_pos;
+            self.peek_pos += 1;
+            None
         };
         self.current = self.peek;
         self.peek = nxt;
@@ -377,7 +374,7 @@ where
     }
 
     fn emit(&mut self, spanned: Spanned) {
-        self.pending.push(spanned);
+        self.pending.push_back(spanned);
     }
 }
 
@@ -438,7 +435,6 @@ mod tests {
     };
 }
 
-    #[allow(dead_code)]
     fn tokenize_sequence(source: &str) -> Vec<Token> {
         make_tokenizer(source)
             .map(|x| x.unwrap())
@@ -446,7 +442,6 @@ mod tests {
             .collect()
     }
 
-    #[allow(dead_code)]
     fn tokenize_error_sequence(source: &str) -> Vec<LexError> {
         make_tokenizer(source)
             .filter(|x| x.is_err())

@@ -2,7 +2,7 @@ use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Token {
-    EOF,
+    Eof,
 
     // Literals
     Str(String),
@@ -61,6 +61,7 @@ pub enum Token {
 }
 
 impl Token {
+    #[must_use]
     pub fn str_to_keyword(s: &str) -> Option<Token> {
         match s {
             "filter" | "where" => Some(Token::Filter),
@@ -123,7 +124,7 @@ impl fmt::Display for Token {
             Token::Sub => "-",
             Token::Mul => "*",
             Token::Div => "/",
-            Token::DivDiv => "/",
+            Token::DivDiv => "//",
             Token::Mod => "%",
             Token::Dot => ".",
             Token::Comma => ",",
@@ -131,8 +132,8 @@ impl fmt::Display for Token {
             Token::AddAdd => "++",
             Token::SubSub => "--",
             Token::GtGt => ">>",
-            Token::EOF => "EOF",
+            Token::Eof => "EOF",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }

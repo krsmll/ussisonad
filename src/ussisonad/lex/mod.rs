@@ -2,8 +2,8 @@ mod error;
 mod lexer;
 mod token;
 
-pub(super) use self::{
-    error::LexError,
-    lexer::{LexResult, Spanned, make_tokenizer},
+pub(crate) use self::lexer::{LexResult, Spanned, make_tokenizer};
+pub use self::{
+    error::{LexError, LexErrorType},
     token::Token,
 };

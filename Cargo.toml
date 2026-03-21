@@ -1,8 +1,15 @@
 [package]
 name = "ussisonad"
 version = "0.1.0"
+description = "Custom DSL used by Kratt"
+readme = "README.md"
+repository = "https://github.com/krsmll/ussisonad"
+keywords = ["dsl", "parser", "language"]
+categories = ["parser-implementations", "text-processing"]
+authors = ["krsmll <kris@mill.sh>"]
+license = "MIT OR Apache-2.0"
 edition = "2024"
-
+rust-version = "1.88"
 [dependencies]
 async-trait = "0.1.89"
 

@@ -1,6 +1,8 @@
+use crate::{LexError, ParserError};
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::fmt;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -14,15 +16,37 @@ pub enum CommandError {
     },
 }
 
+impl fmt::Display for CommandError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CommandError::External(e) => write!(f, "{e}"),
+            CommandError::MissingArgument(name) => write!(f, "missing required argument: {name}"),
+            CommandError::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
+            CommandError::TypeMismatch { expected, got } => {
+                write!(f, "type mismatch: expected {expected}, got {got}")
+            }
+        }
+    }
+}
+
+impl Error for CommandError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            CommandError::External(e) => Some(e.as_ref()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum EvalError {
     UnknownCommand(String),
     UnknownField(String),
-    UnexpectedNull,
     TypeMismatch {
         expected: &'static str,
         got: &'static str,
     },
+    NumberTypeMismatch(Vec<&'static str>),
     UnexpectedInputType {
         command: String,
         expected: Vec<ValueType>,
@@ -39,14 +63,88 @@ pub enum EvalError {
         got: &'static str,
     },
     NotComparable(&'static str, &'static str),
-    NotIterable,
+    LexerStage(Vec<LexError>),
+    ParsingStage(ParserError),
     Handler(CommandError),
+}
+
+impl fmt::Display for EvalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EvalError::UnknownCommand(name) => write!(f, "unknown command: {name}"),
+            EvalError::UnknownField(name) => write!(f, "unknown field: {name}"),
+            EvalError::TypeMismatch { expected, got } => {
+                write!(f, "type mismatch: expected {expected}, got {got}")
+            }
+            EvalError::NumberTypeMismatch(types) => {
+                write!(
+                    f,
+                    "cannot apply numeric operation to types: {}",
+                    types.join(", ")
+                )
+            }
+            EvalError::UnexpectedInputType {
+                command,
+                expected,
+                got,
+            } => {
+                let expected: Vec<String> = expected.iter().map(ToString::to_string).collect();
+                write!(
+                    f,
+                    "command '{command}' received unexpected input type: expected one of [{}], got {got}",
+                    expected.join(", ")
+                )
+            }
+            EvalError::UnexpectedArgumentType {
+                command,
+                expected,
+                got,
+            } => {
+                let expected: Vec<String> = expected.iter().map(ToString::to_string).collect();
+                write!(
+                    f,
+                    "command '{command}' received unexpected argument type: expected one of [{}], got {got}",
+                    expected.join(", ")
+                )
+            }
+            EvalError::UnexpectedReturnType {
+                command,
+                expected,
+                got,
+            } => {
+                write!(
+                    f,
+                    "command '{command}' returned unexpected type: expected {expected}, got {got}"
+                )
+            }
+            EvalError::NotComparable(a, b) => {
+                write!(f, "values of type '{a}' and '{b}' are not comparable")
+            }
+            EvalError::LexerStage(reasons) => {
+                let reasons: Vec<String> = reasons.iter().map(ToString::to_string).collect();
+                write!(f, "errors occurred during lexing: [{}]", reasons.join(", "))
+            }
+            EvalError::ParsingStage(reason) => {
+                write!(f, "errors occurred during parsing: {reason}")
+            }
+            EvalError::Handler(e) => write!(f, "command handler error: {e}"),
+        }
+    }
+}
+
+impl Error for EvalError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            EvalError::Handler(e) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub enum ConfigError {
     MissingCommandName,
-    MissingCommandReturnType,
+    MissingCommandReturnType(String),
     EmptyCommandName,
     DuplicateCommandName(String),
     MissingCommandHandler,
@@ -58,17 +156,75 @@ pub enum ConfigError {
 
     MissingFieldSchemaName,
     EmptyFieldSchemaName,
-    MissingFieldSchemaValueType,
+    MissingFieldSchemaValueType(String),
 
     MissingArgSchemaName,
     EmptyArgSchemaName,
+    MissingArgSchemaValueType(String),
 
     MissingOptionSchemaName,
     MissingOptionSchemaShort,
     EmptyOptionSchemaName,
     EmptyOptionSchemaShort,
-    MissingOptionSchemaValueType,
+    MissingOptionSchemaValueType(String),
 }
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigError::MissingCommandName => write!(f, "command is missing a name"),
+            ConfigError::MissingCommandReturnType(name) => {
+                write!(f, "command '{name}' is missing a return type")
+            }
+            ConfigError::EmptyCommandName => write!(f, "command name must not be empty"),
+            ConfigError::DuplicateCommandName(name) => {
+                write!(f, "duplicate command name: '{name}'")
+            }
+            ConfigError::MissingCommandHandler => write!(f, "command is missing a handler"),
+
+            ConfigError::MissingObjectSchemaName => write!(f, "object schema is missing a name"),
+            ConfigError::EmptyObjectSchemaName => {
+                write!(f, "object schema name must not be empty")
+            }
+            ConfigError::DuplicateObjectSchemaName(name) => {
+                write!(f, "duplicate object schema name: '{name}'")
+            }
+            ConfigError::EmptyObjectSchemaFields => {
+                write!(f, "object schema must have at least one field")
+            }
+
+            ConfigError::MissingFieldSchemaName => write!(f, "field schema is missing a name"),
+            ConfigError::EmptyFieldSchemaName => {
+                write!(f, "field schema name must not be empty")
+            }
+            ConfigError::MissingFieldSchemaValueType(name) => {
+                write!(f, "field '{name}' is missing a value type")
+            }
+
+            ConfigError::MissingArgSchemaName => write!(f, "arg schema is missing a name"),
+            ConfigError::EmptyArgSchemaName => write!(f, "arg schema name must not be empty"),
+            ConfigError::MissingArgSchemaValueType(name) => {
+                write!(f, "arg '{name}' must accept at least one value type")
+            }
+
+            ConfigError::MissingOptionSchemaName => write!(f, "option schema is missing a name"),
+            ConfigError::MissingOptionSchemaShort => {
+                write!(f, "option schema is missing a short name")
+            }
+            ConfigError::EmptyOptionSchemaName => {
+                write!(f, "option schema name must not be empty")
+            }
+            ConfigError::EmptyOptionSchemaShort => {
+                write!(f, "option schema short name must not be empty")
+            }
+            ConfigError::MissingOptionSchemaValueType(name) => {
+                write!(f, "option '{name}' is missing a value type")
+            }
+        }
+    }
+}
+
+impl Error for ConfigError {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -82,6 +238,7 @@ pub enum Value {
 }
 
 impl Value {
+    #[must_use]
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::None => "null",
@@ -116,21 +273,34 @@ pub enum ValueType {
 }
 
 impl ValueType {
+    #[must_use]
     pub fn matches(&self, value: &Value) -> bool {
         match (self, value) {
-            (ValueType::Bool, Value::Bool(_)) => true,
-            (ValueType::Int, Value::Int(_)) => true,
-            (ValueType::Float, Value::Float(_)) => true,
-            (ValueType::Str, Value::Str(_)) => true,
+            (ValueType::Bool, Value::Bool(_))
+            | (ValueType::Int, Value::Int(_))
+            | (ValueType::Float, Value::Float(_))
+            | (ValueType::Str, Value::Str(_)) => true,
             (ValueType::Vector(t), Value::Vector(items)) => {
                 items.iter().all(|item| t.matches(item))
             }
             (ValueType::Object(schema), Value::Object(map)) => schema.fields.iter().all(|field| {
                 map.get(&field.name)
-                    .map(|v| field.value_type.matches(v))
-                    .unwrap_or(false)
+                    .is_some_and(|v| field.value_type.matches(v))
             }),
             _ => false,
+        }
+    }
+}
+
+impl fmt::Display for ValueType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ValueType::Bool => write!(f, "bool"),
+            ValueType::Int => write!(f, "int"),
+            ValueType::Float => write!(f, "float"),
+            ValueType::Str => write!(f, "str"),
+            ValueType::Vector(inner) => write!(f, "vec<{inner}>"),
+            ValueType::Object(schema) => write!(f, "obj<{}>", schema.name),
         }
     }
 }
@@ -148,15 +318,18 @@ impl Registry {
         Self { commands, schemas }
     }
 
+    #[must_use]
     pub fn builder() -> RegistryBuilder {
         RegistryBuilder::new()
     }
 
+    #[must_use]
     pub fn get_command(&self, name: &str) -> Option<&Arc<CommandDefinition>> {
         self.commands.get(name)
     }
 
-    pub fn commands_depending_on(
+    #[must_use]
+    pub fn commands_that_accept(
         &self,
         def: &Arc<CommandDefinition>,
     ) -> Vec<&Arc<CommandDefinition>> {
@@ -166,19 +339,21 @@ impl Registry {
             .collect::<Vec<_>>()
     }
 
-    pub fn commands_depends_on(
+    #[must_use]
+    pub fn commands_that_return(
         &self,
         def: &Arc<CommandDefinition>,
     ) -> Vec<&Arc<CommandDefinition>> {
         self.commands
             .values()
-            .filter_map(|c| match &c.arg {
-                Some(arg) if arg.accepts.contains(&def.returns) => Some(c),
-                _ => None,
+            .filter(|c| match &c.arg {
+                Some(arg) => arg.accepts.contains(&def.returns),
+                _ => false,
             })
             .collect::<Vec<_>>()
     }
 
+    #[must_use]
     pub fn get_schema(&self, name: &str) -> Option<&Arc<ObjectSchema>> {
         self.schemas.get(name)
     }
@@ -195,6 +370,7 @@ impl RegistryBuilder {
         }
     }
 
+    #[must_use]
     pub fn register(mut self, def: CommandDefinitionBuilder) -> Self {
         self.commands.push(def);
         self
@@ -231,7 +407,7 @@ impl RegistryBuilder {
 
     fn populate_schemas(
         schemas: &mut HashMap<String, Arc<ObjectSchema>>,
-        value_types: &Vec<ValueType>,
+        value_types: &[ValueType],
     ) -> Result<(), ConfigError> {
         for t in value_types {
             Self::populate_schema(schemas, t)?;
@@ -279,19 +455,20 @@ pub trait CommandHandler: Send + Sync {
 }
 
 pub struct CommandDefinition {
-    pub(crate) name: String,
-    pub(crate) aliases: Vec<String>,
-    pub(crate) arg: Option<ArgSchema>,
-    pub(crate) flags: Vec<String>,
-    pub(crate) options: Vec<OptionSchema>,
-    pub(crate) description: Option<String>,
-    pub(crate) usage: Option<String>,
-    pub(crate) depends_on: Vec<ValueType>,
-    pub(crate) returns: ValueType,
+    pub name: String,
+    pub aliases: Vec<String>,
+    pub arg: Option<ArgSchema>,
+    pub flags: Vec<String>,
+    pub options: Vec<OptionSchema>,
+    pub description: Option<String>,
+    pub usage: Option<String>,
+    pub depends_on: Vec<ValueType>,
+    pub returns: ValueType,
     pub(crate) handler: Box<dyn CommandHandler>,
 }
 
 impl CommandDefinition {
+    #[must_use]
     pub fn builder() -> CommandDefinitionBuilder {
         CommandDefinitionBuilder::default()
     }
@@ -312,51 +489,61 @@ pub struct CommandDefinitionBuilder {
 }
 
 impl CommandDefinitionBuilder {
+    #[must_use]
     pub fn name(mut self, name: &str) -> Self {
         self.name = Some(name.to_string());
         self
     }
 
+    #[must_use]
     pub fn alias(mut self, alias: &str) -> Self {
         self.aliases.push(alias.to_string());
         self
     }
 
+    #[must_use]
     pub fn arg(mut self, arg: ArgSchemaBuilder) -> Self {
         self.arg = Some(arg);
         self
     }
 
+    #[must_use]
     pub fn flag(mut self, flag: &str) -> Self {
         self.flags.push(flag.to_string());
         self
     }
 
+    #[must_use]
     pub fn option(mut self, option: OptionSchemaBuilder) -> Self {
         self.options.push(option);
         self
     }
 
+    #[must_use]
     pub fn description(mut self, description: &str) -> Self {
         self.description = Some(description.to_string());
         self
     }
 
+    #[must_use]
     pub fn usage(mut self, usage: &str) -> Self {
         self.usage = Some(usage.to_string());
         self
     }
 
+    #[must_use]
     pub fn depends_on(mut self, value_type: ValueType) -> Self {
         self.depends_on.push(value_type);
         self
     }
 
+    #[must_use]
     pub fn returns(mut self, value_type: ValueType) -> Self {
         self.returns = Some(value_type);
         self
     }
 
+    #[must_use]
     pub fn handler(mut self, handler: impl CommandHandler + 'static) -> Self {
         self.handler = Some(Box::new(handler));
         self
@@ -368,23 +555,20 @@ impl CommandDefinitionBuilder {
             ConfigError::EmptyCommandName,
         )?;
         let aliases = self.aliases;
-        let arg = self.arg.map(|arg| arg.build()).transpose()?;
+        let arg = self.arg.map(ArgSchemaBuilder::build).transpose()?;
         let flags = self.flags;
         let description = self.description;
         let usage = self.usage;
         let handler = self.handler.ok_or(ConfigError::MissingCommandHandler)?;
         let depends_on = self.depends_on;
-
-        let returns = if let Some(t) = self.returns {
-            t
-        } else {
-            return Err(ConfigError::MissingCommandReturnType);
-        };
+        let returns = self
+            .returns
+            .ok_or(ConfigError::MissingCommandReturnType(name.clone()))?;
 
         let options = self
             .options
             .into_iter()
-            .map(|a| a.build())
+            .map(OptionSchemaBuilder::build)
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(CommandDefinition {
@@ -392,23 +576,24 @@ impl CommandDefinitionBuilder {
             aliases,
             arg,
             flags,
+            options,
             description,
             usage,
             depends_on,
             returns,
             handler,
-            options,
         })
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectSchema {
-    name: String,
-    fields: Vec<FieldSchema>,
+    pub name: String,
+    pub fields: Vec<FieldSchema>,
 }
 
 impl ObjectSchema {
+    #[must_use]
     pub fn builder() -> ObjectSchemaBuilder {
         ObjectSchemaBuilder::default()
     }
@@ -421,11 +606,13 @@ pub struct ObjectSchemaBuilder {
 }
 
 impl ObjectSchemaBuilder {
+    #[must_use]
     pub fn name(mut self, name: &str) -> Self {
         self.name = Some(name.to_string());
         self
     }
 
+    #[must_use]
     pub fn field(mut self, field: FieldSchemaBuilder) -> Self {
         self.fields.push(field);
         self
@@ -445,7 +632,7 @@ impl ObjectSchemaBuilder {
         let fields = self
             .fields
             .into_iter()
-            .map(|f| f.build())
+            .map(FieldSchemaBuilder::build)
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(ObjectSchema { name, fields })
@@ -454,12 +641,13 @@ impl ObjectSchemaBuilder {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldSchema {
-    name: String,
-    aliases: Vec<String>,
-    value_type: ValueType,
+    pub name: String,
+    pub aliases: Vec<String>,
+    pub value_type: ValueType,
 }
 
 impl FieldSchema {
+    #[must_use]
     pub fn builder() -> FieldSchemaBuilder {
         FieldSchemaBuilder::default()
     }
@@ -473,16 +661,19 @@ pub struct FieldSchemaBuilder {
 }
 
 impl FieldSchemaBuilder {
+    #[must_use]
     pub fn name(mut self, name: &str) -> Self {
         self.name = Some(name.to_string());
         self
     }
 
+    #[must_use]
     pub fn alias(mut self, alias: &str) -> Self {
         self.aliases.push(alias.to_string());
         self
     }
 
+    #[must_use]
     pub fn value_type(mut self, value_type: ValueType) -> Self {
         self.value_type = Some(value_type);
         self
@@ -497,7 +688,7 @@ impl FieldSchemaBuilder {
         let aliases = self.aliases;
         let value_type = self
             .value_type
-            .ok_or(ConfigError::MissingFieldSchemaValueType)?;
+            .ok_or(ConfigError::MissingFieldSchemaValueType(name.clone()))?;
 
         Ok(FieldSchema {
             name,
@@ -509,12 +700,13 @@ impl FieldSchemaBuilder {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArgSchema {
-    pub(crate) name: String,
-    pub(crate) accepts: Vec<ValueType>,
-    pub(crate) required: bool,
+    pub name: String,
+    pub accepts: Vec<ValueType>,
+    pub required: bool,
 }
 
 impl ArgSchema {
+    #[must_use]
     pub fn builder() -> ArgSchemaBuilder {
         ArgSchemaBuilder::default()
     }
@@ -528,16 +720,19 @@ pub struct ArgSchemaBuilder {
 }
 
 impl ArgSchemaBuilder {
+    #[must_use]
     pub fn name(mut self, name: &str) -> Self {
         self.name = Some(name.to_string());
         self
     }
 
+    #[must_use]
     pub fn accepts(mut self, value_type: ValueType) -> Self {
         self.accepts.push(value_type);
         self
     }
 
+    #[must_use]
     pub fn required(mut self) -> Self {
         self.required = true;
         self
@@ -552,7 +747,7 @@ impl ArgSchemaBuilder {
         )?;
 
         let accepts = if self.accepts.is_empty() {
-            return Err(ConfigError::MissingFieldSchemaValueType);
+            return Err(ConfigError::MissingArgSchemaValueType(name));
         } else {
             self.accepts
         };
@@ -567,13 +762,14 @@ impl ArgSchemaBuilder {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OptionSchema {
-    name: String,
-    short: String,
-    value_type: ValueType,
-    default: Option<Value>,
+    pub name: String,
+    pub short: String,
+    pub value_type: ValueType,
+    pub default: Option<Value>,
 }
 
 impl OptionSchema {
+    #[must_use]
     pub fn builder() -> OptionSchemaBuilder {
         OptionSchemaBuilder::default()
     }
@@ -588,21 +784,25 @@ pub struct OptionSchemaBuilder {
 }
 
 impl OptionSchemaBuilder {
+    #[must_use]
     pub fn name(mut self, name: &str) -> Self {
         self.name = Some(name.to_string());
         self
     }
 
+    #[must_use]
     pub fn short(mut self, short: &str) -> Self {
         self.short = Some(short.to_string());
         self
     }
 
+    #[must_use]
     pub fn value_type(mut self, value_type: ValueType) -> Self {
         self.value_type = Some(value_type);
         self
     }
 
+    #[must_use]
     pub fn default_value(mut self, default: Value) -> Self {
         self.default = Some(default);
         self
@@ -621,7 +821,7 @@ impl OptionSchemaBuilder {
         };
         let value_type = self
             .value_type
-            .ok_or(ConfigError::MissingOptionSchemaValueType)?;
+            .ok_or(ConfigError::MissingOptionSchemaValueType(name.clone()))?;
         let default = self.default;
 
         Ok(OptionSchema {

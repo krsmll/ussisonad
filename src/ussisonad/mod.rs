@@ -1,4 +1,4 @@
-mod evaluator;
-mod lex;
-mod model;
-mod parse;
+pub(crate) mod evaluator;
+pub(crate) mod lex;
+pub(crate) mod model;
+pub(crate) mod parse;

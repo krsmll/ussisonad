@@ -47,8 +47,8 @@ pub enum BinOp {
 }
 
 impl BinOp {
-    pub fn bp(&self) -> (u8, u8) {
-        match self {
+    pub fn bp(bin_op: BinOp) -> (u8, u8) {
+        match bin_op {
             BinOp::Mul | BinOp::Div | BinOp::DivDiv | BinOp::Mod => (70, 71),
             BinOp::Add | BinOp::Sub => (60, 61),
             BinOp::In

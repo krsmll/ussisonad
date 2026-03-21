@@ -1,6 +1,9 @@
+use crate::ParserError;
+use crate::ussisonad::lex;
 use crate::ussisonad::model::{CommandInput, EvalError, Registry, Value};
 use crate::ussisonad::parse::ast;
-use std::collections::{HashMap, HashSet};
+use crate::ussisonad::parse::parser::Parser;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub struct Evaluator {
@@ -8,13 +11,25 @@ pub struct Evaluator {
 }
 
 impl Evaluator {
+    #[must_use]
     pub fn new(registry: Arc<Registry>) -> Self {
         Self { registry }
     }
 
-    pub async fn execute(&self, node: &ast::PipelineNode) -> Result<Value, EvalError> {
+    pub async fn execute(&self, src_input: &str) -> Result<Value, EvalError> {
+        let tokenizer = lex::make_tokenizer(src_input);
+        let ast = Parser::parse(tokenizer).map_err(|err| match err {
+            ParserError::LexerStage(lex_errs) => EvalError::LexerStage(lex_errs),
+            parse_errs => EvalError::ParsingStage(parse_errs),
+        })?;
+
+        self.evaluate_ast(&ast).await
+    }
+
+    pub async fn evaluate_ast(&self, node: &ast::PipelineNode) -> Result<Value, EvalError> {
         self.eval_node(node, Value::None).await
     }
+
     async fn eval_node(&self, node: &ast::PipelineNode, input: Value) -> Result<Value, EvalError> {
         match node {
             ast::PipelineNode::Command(cmd) => self.eval_command(cmd, input).await,
@@ -27,7 +42,7 @@ impl Evaluator {
             ast::PipelineNode::Concat { lhs, rhs } => {
                 let lhs = Box::pin(self.eval_node(lhs, input.clone())).await?;
                 let rhs = Box::pin(self.eval_node(rhs, input)).await?;
-                Self::concat_values(lhs, rhs)
+                Ok(Self::concat_values(lhs, rhs))
             }
         }
     }
@@ -41,53 +56,12 @@ impl Evaluator {
 
     fn eval_builtin(&self, cmd: &ast::BuiltinCommand, input: Value) -> Result<Value, EvalError> {
         match cmd {
-            ast::BuiltinCommand::Filter(expr) => {
-                let items = input.into_vector()?;
-                let filtered = items
-                    .into_iter()
-                    .filter_map(|item| match self.eval_expr(expr, &item) {
-                        Ok(Value::Bool(true)) => Some(Ok(item)),
-                        Ok(Value::Bool(false)) | Ok(Value::None) => None,
-                        Ok(other) => Some(Err(EvalError::TypeMismatch {
-                            expected: "bool",
-                            got: other.type_name(),
-                        })),
-                        Err(e) => Some(Err(e)),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Value::Vector(filtered))
-            }
+            ast::BuiltinCommand::Filter(expr) => self.eval_filter(input, expr),
+            ast::BuiltinCommand::Unique(field) => self.eval_unique(input, field.as_ref()),
+            ast::BuiltinCommand::Map(expr) => self.eval_map(input, expr),
 
             ast::BuiltinCommand::Sort { field, direction } => {
-                let mut items = input.into_vector()?;
-                let mut error = None;
-                items.sort_by(|a, b| {
-                    if error.is_some() {
-                        return std::cmp::Ordering::Equal;
-                    }
-                    let lhs = self.eval_expr(field, a);
-                    let rhs = self.eval_expr(field, b);
-                    match (lhs, rhs) {
-                        (Ok(a), Ok(b)) => {
-                            let ord = Self::compare_values(&a, &b).unwrap_or_else(|e| {
-                                error = Some(e);
-                                std::cmp::Ordering::Equal
-                            });
-                            match direction {
-                                ast::SortDirection::Asc => ord,
-                                ast::SortDirection::Desc => ord.reverse(),
-                            }
-                        }
-                        (Err(e), _) | (_, Err(e)) => {
-                            error = Some(e);
-                            std::cmp::Ordering::Equal
-                        }
-                    }
-                });
-                if let Some(e) = error {
-                    return Err(e);
-                }
-                Ok(Value::Vector(items))
+                self.eval_sort(input, field, *direction)
             }
 
             ast::BuiltinCommand::Limit(n) => {
@@ -95,37 +69,93 @@ impl Evaluator {
                 Ok(Value::Vector(items.into_iter().take(*n as usize).collect()))
             }
 
-            ast::BuiltinCommand::Unique(field) => {
-                let items = input.into_vector()?;
-                let mut seen = HashSet::new();
-                let mut result = Vec::new();
-                for item in items {
-                    let key = match field {
-                        Some(expr) => self.eval_expr(expr, &item)?,
-                        None => item.clone(),
-                    };
-                    let key_str = format!("{:?}", key);
-                    if seen.insert(key_str) {
-                        result.push(item);
-                    }
-                }
-                Ok(Value::Vector(result))
-            }
-
-            ast::BuiltinCommand::Map(expr) => {
-                let items = input.into_vector()?;
-                let mapped = items
-                    .into_iter()
-                    .map(|item| self.eval_expr(expr, &item))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Value::Vector(mapped))
-            }
-
             ast::BuiltinCommand::Count => {
                 let items = input.into_vector()?;
                 Ok(Value::Int(items.len() as i64))
             }
         }
+    }
+
+    fn eval_map(&self, input: Value, expr: &ast::Expr) -> Result<Value, EvalError> {
+        let items = input.into_vector()?;
+        let mapped = items
+            .into_iter()
+            .map(|item| self.eval_expr(expr, &item))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Value::Vector(mapped))
+    }
+
+    fn eval_unique(&self, input: Value, field: Option<&ast::Expr>) -> Result<Value, EvalError> {
+        let items = input.into_vector()?;
+        let mut seen: Vec<Value> = Vec::new();
+        let mut result = Vec::new();
+        for item in items {
+            let key = match field {
+                Some(expr) => self.eval_expr(expr, &item)?,
+                None => item.clone(),
+            };
+
+            if !seen.contains(&key) {
+                seen.push(key);
+                result.push(item);
+            }
+        }
+        Ok(Value::Vector(result))
+    }
+
+    fn eval_filter(&self, input: Value, expr: &ast::Expr) -> Result<Value, EvalError> {
+        let items = input.into_vector()?;
+        let filtered = items
+            .into_iter()
+            .filter_map(|item| match self.eval_expr(expr, &item) {
+                Ok(Value::Bool(true)) => Some(Ok(item)),
+                Ok(Value::Bool(false) | Value::None) => None,
+                Ok(other) => Some(Err(EvalError::TypeMismatch {
+                    expected: "bool",
+                    got: other.type_name(),
+                })),
+                Err(e) => Some(Err(e)),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Value::Vector(filtered))
+    }
+
+    fn eval_sort(
+        &self,
+        input: Value,
+        field: &ast::Expr,
+        direction: ast::SortDirection,
+    ) -> Result<Value, EvalError> {
+        let items = input.into_vector()?;
+        let mut keyed: Vec<(Value, Value)> = items
+            .into_iter()
+            .map(|item| Ok((self.eval_expr(field, &item)?, item)))
+            .collect::<Result<_, _>>()?;
+
+        let mut lazy_error = None;
+        keyed.sort_by(|(a, _), (b, _)| {
+            if lazy_error.is_some() {
+                return std::cmp::Ordering::Equal;
+            }
+
+            let ord = Self::compare_values(a, b).unwrap_or_else(|e| {
+                lazy_error = Some(e);
+                std::cmp::Ordering::Equal
+            });
+
+            match direction {
+                ast::SortDirection::Asc => ord,
+                ast::SortDirection::Desc => ord.reverse(),
+            }
+        });
+
+        if let Some(err) = lazy_error {
+            return Err(err);
+        }
+
+        Ok(Value::Vector(
+            keyed.into_iter().map(|(_, item)| item).collect(),
+        ))
     }
 
     async fn eval_custom(
@@ -243,6 +273,7 @@ impl Evaluator {
                             }),
                         };
                     }
+
                     ast::BinOp::Or => {
                         let l = self.eval_expr(lhs, context)?;
                         return match l {
@@ -254,28 +285,29 @@ impl Evaluator {
                             }),
                         };
                     }
+
                     _ => {}
                 }
 
                 let l = self.eval_expr(lhs, context)?;
                 let r = self.eval_expr(rhs, context)?;
 
-                self.eval_binary(op, l, r)
+                Self::eval_binary(op, l, r)
             }
         }
     }
 
-    fn eval_binary(&self, op: &ast::BinOp, lhs: Value, rhs: Value) -> Result<Value, EvalError> {
+    fn eval_binary(op: &ast::BinOp, lhs: Value, rhs: Value) -> Result<Value, EvalError> {
         match op {
             // arithmetic
             ast::BinOp::Add => Self::numeric_op(lhs, rhs, |a, b| a + b, |a, b| a + b),
             ast::BinOp::Sub => Self::numeric_op(lhs, rhs, |a, b| a - b, |a, b| a - b),
             ast::BinOp::Mul => Self::numeric_op(lhs, rhs, |a, b| a * b, |a, b| a * b),
             ast::BinOp::Div => Self::numeric_op(lhs, rhs, |a, b| a / b, |a, b| a / b),
+            ast::BinOp::Mod => Self::numeric_op(lhs, rhs, |a, b| a % b, |a, b| a % b),
             ast::BinOp::DivDiv => {
                 Self::numeric_op(lhs, rhs, |a, b| a / b, |a, b| (a as i64 / b as i64) as f64)
             }
-            ast::BinOp::Mod => Self::numeric_op(lhs, rhs, |a, b| a % b, |a, b| a % b),
 
             // comparison
             ast::BinOp::Eq => Ok(Value::Bool(lhs == rhs)),
@@ -286,8 +318,26 @@ impl Evaluator {
             ast::BinOp::Le => Self::compare_values(&lhs, &rhs).map(|o| Value::Bool(o.is_le())),
 
             // membership
-            ast::BinOp::In | ast::BinOp::Contains => match &rhs {
+            ast::BinOp::Contains => match &lhs {
+                Value::Vector(items) => Ok(Value::Bool(items.contains(&rhs))),
+
+                Value::Str(s) => match &rhs {
+                    Value::Str(sub) => Ok(Value::Bool(s.contains(sub))),
+                    _ => Err(EvalError::TypeMismatch {
+                        expected: "string",
+                        got: rhs.type_name(),
+                    }),
+                },
+
+                _ => Err(EvalError::TypeMismatch {
+                    expected: "vector or string",
+                    got: rhs.type_name(),
+                }),
+            },
+
+            ast::BinOp::In => match &rhs {
                 Value::Vector(items) => Ok(Value::Bool(items.contains(&lhs))),
+
                 Value::Str(s) => match &lhs {
                     Value::Str(sub) => Ok(Value::Bool(s.contains(sub.as_str()))),
                     _ => Err(EvalError::TypeMismatch {
@@ -295,6 +345,7 @@ impl Evaluator {
                         got: lhs.type_name(),
                     }),
                 },
+
                 _ => Err(EvalError::TypeMismatch {
                     expected: "vector or string",
                     got: rhs.type_name(),
@@ -316,45 +367,52 @@ impl Evaluator {
             (Value::Float(a), Value::Float(b)) => Ok(Value::Float(float_op(a, b))),
             (Value::Int(a), Value::Float(b)) => Ok(Value::Float(float_op(a as f64, b))),
             (Value::Float(a), Value::Int(b)) => Ok(Value::Float(float_op(a, b as f64))),
-            (l, r) => Err(EvalError::TypeMismatch {
-                expected: "number",
-                got: format!("{} and {}", l.type_name(), r.type_name()).leak(),
-            }),
+            (l, r) => Err(EvalError::NumberTypeMismatch(vec![
+                l.type_name(),
+                r.type_name(),
+            ])),
         }
     }
 
     fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalError> {
         match (a, b) {
             (Value::Int(a), Value::Int(b)) => Ok(a.cmp(b)),
-            (Value::Float(a), Value::Float(b)) => {
-                Ok(a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            }
-            (Value::Int(a), Value::Float(b)) => Ok((*a as f64)
+
+            (Value::Float(a), Value::Float(b)) => a
                 .partial_cmp(b)
-                .unwrap_or(std::cmp::Ordering::Equal)),
-            (Value::Float(a), Value::Int(b)) => Ok(a
+                .ok_or(EvalError::NotComparable("float", "float")),
+
+            (Value::Int(a), Value::Float(b)) => (*a as f64)
+                .partial_cmp(b)
+                .ok_or(EvalError::NotComparable("int", "float")),
+
+            (Value::Float(a), Value::Int(b)) => a
                 .partial_cmp(&(*b as f64))
-                .unwrap_or(std::cmp::Ordering::Equal)),
+                .ok_or(EvalError::NotComparable("float", "int")),
+
             (Value::Str(a), Value::Str(b)) => Ok(a.cmp(b)),
             _ => Err(EvalError::NotComparable(a.type_name(), b.type_name())),
         }
     }
 
-    fn concat_values(a: Value, b: Value) -> Result<Value, EvalError> {
+    fn concat_values(a: Value, b: Value) -> Value {
         match (a, b) {
             (Value::Vector(mut a), Value::Vector(b)) => {
                 a.extend(b);
-                Ok(Value::Vector(a))
+                Value::Vector(a)
             }
+
             (Value::Vector(mut a), b) => {
                 a.push(b);
-                Ok(Value::Vector(a))
+                Value::Vector(a)
             }
+
             (a, Value::Vector(mut b)) => {
                 b.insert(0, a);
-                Ok(Value::Vector(b))
+                Value::Vector(b)
             }
-            (a, b) => Ok(Value::Vector(vec![a, b])),
+
+            (a, b) => Value::Vector(vec![a, b]),
         }
     }
 }
@@ -362,27 +420,20 @@ impl Evaluator {
 #[cfg(test)]
 mod tests {
     use crate::ussisonad::evaluator::Evaluator;
-    use crate::ussisonad::lex::make_tokenizer;
     use crate::ussisonad::model::{
         ArgSchema, CommandDefinition, CommandError, CommandHandler, CommandInput, ConfigError,
         EvalError, FieldSchema, ObjectSchema, Registry, Value, ValueType,
     };
-    use crate::ussisonad::parse::ast::{
-        BinOp, BuiltinCommand, Command, CustomCommand, Expr, PipelineNode,
-    };
-    use crate::ussisonad::parse::parser::Parser;
     use async_trait::async_trait;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio_test::assert_ok;
 
     macro_rules! assert_expr {
         ($src:expr, $expected:expr) => {
             let registry = assert_ok!(create_registry());
-            let toks = make_tokenizer($src);
-            let ast = Parser::new(toks).parse().unwrap();
             let evaluator = Evaluator::new(Arc::new(registry));
-            let result = evaluator.execute(&ast).await.unwrap();
+            let result = evaluator.execute($src).await.unwrap();
 
             assert_eq!(result, $expected);
         };
@@ -391,10 +442,8 @@ mod tests {
     macro_rules! assert_expr_err {
         ($src:expr, $pattern:pat) => {
             let registry = assert_ok!(create_registry());
-            let toks = make_tokenizer($src);
-            let ast = Parser::new(toks).parse().unwrap();
             let evaluator = Evaluator::new(Arc::new(registry));
-            let result = evaluator.execute(&ast).await;
+            let result = evaluator.execute($src).await;
             assert!(
                 matches!(result, Err($pattern)),
                 "expected error, got: {:?}",
@@ -457,9 +506,11 @@ mod tests {
 
             match context {
                 Value::None => Ok(Value::None),
+                Value::Int(n) => Ok(Value::Int(n * factor)),
+
                 Value::Vector(items) => {
                     let result = items
-                        .into_iter()
+                        .iter()
                         .map(|item| match item {
                             Value::Int(n) => Ok(Value::Int(n * factor)),
                             other => Err(CommandError::TypeMismatch {
@@ -470,7 +521,7 @@ mod tests {
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(Value::Vector(result))
                 }
-                Value::Int(n) => Ok(Value::Int(n * factor)),
+
                 other => Err(CommandError::TypeMismatch {
                     expected: "int or vector",
                     got: other.type_name(),
@@ -517,16 +568,16 @@ mod tests {
             match context {
                 Value::Vector(items) => {
                     let result = items
-                        .clone()
-                        .into_iter()
+                        .iter()
                         .map(|item| match item {
-                            Value::Int(n) => n,
+                            Value::Int(n) => *n,
                             _ => unreachable!(),
                         })
                         .reduce(|acc, n| acc * n)
                         .unwrap_or(0);
                     Ok(Value::Int(result))
                 }
+
                 other => Err(CommandError::TypeMismatch {
                     expected: "vector",
                     got: other.type_name(),
