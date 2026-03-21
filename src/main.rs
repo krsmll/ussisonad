@@ -1,5 +1,3 @@
-mod ussisonad;
+pub mod ussisonad;
 
-fn main() {
-
-}
+fn main() {}

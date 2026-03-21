@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
+    It,
     Str(String),
     Int(i64),
     Float(f64),
@@ -25,6 +26,7 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    DivDiv,
     Mod,
 
     // comparison
@@ -47,7 +49,7 @@ pub enum BinOp {
 impl BinOp {
     pub fn bp(&self) -> (u8, u8) {
         match self {
-            BinOp::Mul | BinOp::Div | BinOp::Mod => (70, 71),
+            BinOp::Mul | BinOp::Div | BinOp::DivDiv | BinOp::Mod => (70, 71),
             BinOp::Add | BinOp::Sub => (60, 61),
             BinOp::In
             | BinOp::Contains
@@ -70,8 +72,8 @@ pub enum PipelineNode {
         rhs: Box<PipelineNode>,
     },
     Concat {
-        left: Box<PipelineNode>,
-        right: Box<PipelineNode>,
+        lhs: Box<PipelineNode>,
+        rhs: Box<PipelineNode>,
     },
     Command(Command),
 }
@@ -85,7 +87,7 @@ pub enum Command {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CustomCommand {
     pub name: String,
-    pub args: Vec<Expr>,
+    pub arg: Option<Expr>,
     pub flags: HashSet<String>,
     pub options: HashMap<String, Expr>,
 }
@@ -99,6 +101,7 @@ pub enum BuiltinCommand {
     },
     Count,
     Limit(u64),
+    Map(Expr),
     Unique(Option<Expr>),
 }
 

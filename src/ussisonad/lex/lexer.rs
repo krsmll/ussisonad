@@ -88,7 +88,6 @@ where
         match c {
             '=' => self.emit_single_char(Token::Eq)?,
             '*' => self.emit_single_char(Token::Mul)?,
-            '/' => self.emit_single_char(Token::Div)?,
             '%' => self.emit_single_char(Token::Mod)?,
             '(' => self.emit_single_char(Token::LeftParen)?,
             ')' => self.emit_single_char(Token::RightParen)?,
@@ -96,6 +95,17 @@ where
             '}' => self.emit_single_char(Token::RightBrace)?,
             ',' => self.emit_single_char(Token::Comma)?,
             ';' => self.emit_single_char(Token::Semicolon)?,
+            '/' => {
+                let tok_start = self.current_pos;
+                self.next_char();
+                if self.current == Some('/') {
+                    self.next_char();
+                    let tok_end = self.pos();
+                    self.emit((Token::DivDiv, tok_start, tok_end));
+                } else {
+                    self.emit_single_char(Token::Div)?;
+                }
+            }
             '.' => {
                 if let Some(next) = self.peek()
                     && !next.is_whitespace()
@@ -105,7 +115,7 @@ where
                     let pos = self.pos();
                     self.next_char();
                     return Err(LexError {
-                        error: LexErrorType::UnfinishedDotAccess,
+                        kind: LexErrorType::UnfinishedDotAccess,
                         location: (pos, pos),
                     });
                 }
@@ -197,8 +207,9 @@ where
             }
             c => {
                 let pos = self.pos();
+                self.next_char();
                 return Err(LexError {
-                    error: LexErrorType::UnrecognizedToken(c),
+                    kind: LexErrorType::UnrecognizedToken(c),
                     location: (pos, pos),
                 });
             }
@@ -213,7 +224,7 @@ where
         match self.next_char() {
             Some(_) => Ok(self.emit((token, tok_start, self.pos()))),
             None => Err(LexError {
-                error: LexErrorType::UnexpectedEof,
+                kind: LexErrorType::UnexpectedEof,
                 location: (tok_start, self.pos()),
             }),
         }
@@ -275,8 +286,15 @@ where
                         content.push('\\');
                         content.push(c);
                     } else {
+                        // skip to closing quote or eof in case of bad string escape
+                        loop {
+                            match self.next_char() {
+                                Some('"') | None => break,
+                                _ => {}
+                            }
+                        }
                         return Err(LexError {
-                            error: LexErrorType::BadStringEscape,
+                            kind: LexErrorType::BadStringEscape,
                             location: (slash_pos, self.pos()),
                         });
                     }
@@ -284,7 +302,7 @@ where
                 Some(c) => content.push(c),
                 None => {
                     return Err(LexError {
-                        error: LexErrorType::UnexpectedStringEnd,
+                        kind: LexErrorType::UnexpectedStringEnd,
                         location: (start_pos, start_pos),
                     });
                 }
@@ -307,7 +325,7 @@ where
 
         loop {
             match self.current {
-                Some('_') => continue,
+                Some('_') => {}
                 Some('.') => {
                     is_decimal = true;
                     content.push('.');
@@ -340,7 +358,6 @@ where
                 Some(c)
             }
             None => {
-                // EOF needs a single advance
                 self.current_pos = self.peek_pos;
                 self.peek_pos += 1;
                 None
@@ -404,6 +421,23 @@ mod tests {
     };
 }
 
+    macro_rules! assert_error_type {
+    ($src:expr, $($expected:expr),* $(,)?) => {
+        let errors = tokenize_error_sequence($src);
+        let expected = vec![$($expected),*];
+        assert_eq!(
+            errors.len(),
+            expected.len(),
+            "Error count mismatch for input: '{}'",
+            $src
+        );
+        for (i, (error, exp)) in errors.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(error.kind, *exp, "Error mismatch at index {}: expected {:?}, got {:?}", i, exp, error);
+        }
+        ()
+    };
+}
+
     #[allow(dead_code)]
     fn tokenize_sequence(source: &str) -> Vec<Token> {
         make_tokenizer(source)
@@ -421,12 +455,12 @@ mod tests {
     }
 
     #[test]
-    fn flag() {
+    fn test_flag() {
         assert_tokens!(";top", Token::Semicolon, Token::Str("top".to_string()));
     }
 
     #[test]
-    fn value_identifier() {
+    fn test_value_identifier() {
         assert_tokens!(
             ";top Slay",
             Token::Semicolon,
@@ -436,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn value_string() {
+    fn test_value_string() {
         assert_tokens!(
             ";top \"Tiger Claw\"",
             Token::Semicolon,
@@ -446,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn value_array_with_commas() {
+    fn test_value_array_with_commas() {
         assert_tokens!(
             ";top (Slay, \"Tiger Claw\")",
             Token::Semicolon,
@@ -460,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn value_array_no_commas() {
+    fn test_value_array_no_commas() {
         assert_tokens!(
             ";top (Slay Lotragon blourgh \"Tiger Claw\")",
             Token::Semicolon,
@@ -475,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn value_integer() {
+    fn test_value_integer() {
         assert_tokens!(
             ";square 67",
             Token::Semicolon,
@@ -485,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn value_negative_integer() {
+    fn test_value_negative_integer() {
         assert_tokens!(
             ";square -69",
             Token::Semicolon,
@@ -495,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn value_expr() {
+    fn test_value_expr() {
         assert_tokens!(
             ";square 67 + 7.27",
             Token::Semicolon,
@@ -507,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn value_with_underscore() {
+    fn test_value_with_underscore() {
         assert_tokens!(
             ";top CreeperBro_2015",
             Token::Semicolon,
@@ -517,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn option_all_types() {
+    fn test_option_all_types() {
         assert_tokens!(
             ";top --limit 5 -mode standard -fc",
             Token::Semicolon,
@@ -534,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn options_with_value() {
+    fn test_options_with_value() {
         assert_tokens!(
             ";top Slay --limit 5 --mode standard",
             Token::Semicolon,
@@ -550,20 +584,20 @@ mod tests {
     }
 
     #[test]
-    fn error_unclosed_string_value() {
+    fn test_error_unclosed_string_value() {
         let s = ";top \"Tiger Claw";
         let last_quote_pos = s.rfind('\"').unwrap() + 1;
         assert_error!(
             s,
             LexError {
-                error: LexErrorType::UnexpectedStringEnd,
+                kind: LexErrorType::UnexpectedStringEnd,
                 location: (last_quote_pos, last_quote_pos),
             }
         );
     }
 
     #[test]
-    fn dot_access() {
+    fn test_dot_access() {
         assert_tokens!(
             ";top .some.value",
             Token::Semicolon,
@@ -576,33 +610,33 @@ mod tests {
     }
 
     #[test]
-    fn error_unfinished_dot_access() {
+    fn test_error_unfinished_dot_access() {
         let s = ";top . --limit 5";
         let err_idx = s.rfind('.').unwrap();
         assert_error!(
             s,
             LexError {
-                error: LexErrorType::UnfinishedDotAccess,
+                kind: LexErrorType::UnfinishedDotAccess,
                 location: (err_idx, err_idx)
             }
         );
     }
 
     #[test]
-    fn error_unfinished_dot_access_at_eof() {
+    fn test_error_unfinished_dot_access_at_eof() {
         let s = ";top .";
         let err_idx = s.len() - 1;
         assert_error!(
             s,
             LexError {
-                error: LexErrorType::UnfinishedDotAccess,
+                kind: LexErrorType::UnfinishedDotAccess,
                 location: (err_idx, err_idx)
             }
         );
     }
 
     #[test]
-    fn with_one_pipe_no_expr() {
+    fn test_with_one_pipe_no_expr() {
         assert_tokens!(
             ";top >> count",
             Token::Semicolon,
@@ -613,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn one_pipe_with_expr() {
+    fn test_one_pipe_with_expr() {
         assert_tokens!(
             ";top >> filter .bpm >= 250",
             Token::Semicolon,
@@ -628,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_pipes_with_expr() {
+    fn test_multiple_pipes_with_expr() {
         assert_tokens!(
             ";top chocomint >> filter .bpm >= 250 >> sort .acc --ascending",
             Token::Semicolon,
@@ -650,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn subcommand() {
+    fn test_subcommand() {
         assert_tokens!(
             ";tops (Slay, Lotragon) ++ { top mrekk --server akatsuki } >> sort .bpm",
             Token::Semicolon,
@@ -676,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn logic() {
+    fn test_logic() {
         assert_tokens!(
             ";top >> filter (.bpm >= 230 and HD in .mods) or .bpm >= 250",
             Token::Semicolon,
@@ -703,7 +737,359 @@ mod tests {
     }
 
     #[test]
-    fn logic_with_subcommand() {
+    fn test_keyword_map() {
+        assert_tokens!(
+            ";top >> map .title",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::GtGt,
+            Token::Map,
+            Token::Dot,
+            Token::Str("title".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_keyword_it() {
+        assert_tokens!(
+            ";top >> filter it > 0",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::It,
+            Token::Gt,
+            Token::Int("0".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_keyword_self_alias() {
+        assert_tokens!(
+            ";top >> filter self > 0",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::It,
+            Token::Gt,
+            Token::Int("0".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_keyword_booleans() {
+        assert_tokens!(
+            ";top true false",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::Bool(true),
+            Token::Bool(false),
+        );
+    }
+
+    #[test]
+    fn test_keyword_not() {
+        assert_tokens!(
+            ";top >> filter not .fc",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::Not,
+            Token::Dot,
+            Token::Str("fc".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_operator_bang_not() {
+        assert_tokens!(
+            ";top >> filter !.fc",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::Not,
+            Token::Dot,
+            Token::Str("fc".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_keyword_contains() {
+        assert_tokens!(
+            ";top >> filter .title contains loved",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::Dot,
+            Token::Str("title".to_string()),
+            Token::Contains,
+            Token::Str("loved".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_keyword_take() {
+        assert_tokens!(
+            ";top >> take 5",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::GtGt,
+            Token::Take,
+            Token::Int("5".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_keyword_with_alias() {
+        assert_tokens!(
+            ";top with recent",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::AddAdd,
+            Token::Str("recent".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_keyword_is_alias() {
+        assert_tokens!(
+            ";top >> filter .status is active",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::Dot,
+            Token::Str("status".to_string()),
+            Token::Eq,
+            Token::Str("active".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_keyword_above_alias() {
+        assert_tokens!(
+            ";top >> filter .bpm above 200",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::Dot,
+            Token::Str("bpm".to_string()),
+            Token::Ge,
+            Token::Int("200".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_keyword_below_alias() {
+        assert_tokens!(
+            ";top >> filter .bpm below 300",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::Dot,
+            Token::Str("bpm".to_string()),
+            Token::Le,
+            Token::Int("300".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_operator_mul_mod() {
+        assert_tokens!(
+            ";top 3 * 4 % 2",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::Int("3".to_string()),
+            Token::Mul,
+            Token::Int("4".to_string()),
+            Token::Mod,
+            Token::Int("2".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_operator_div() {
+        assert_tokens!(
+            ";top 10 / 2",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::Int("10".to_string()),
+            Token::Div,
+            Token::Int("2".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_operator_divdiv() {
+        assert_tokens!(
+            ";top 10 // 3",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::Int("10".to_string()),
+            Token::DivDiv,
+            Token::Int("3".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_operator_ne() {
+        assert_tokens!(
+            ";top >> filter .rank != 1",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::Dot,
+            Token::Str("rank".to_string()),
+            Token::Ne,
+            Token::Int("1".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_operator_lt_le() {
+        assert_tokens!(
+            ";top >> filter .score < 100",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::Dot,
+            Token::Str("score".to_string()),
+            Token::Lt,
+            Token::Int("100".to_string()),
+        );
+        assert_tokens!(
+            ";top >> filter .score <= 100",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::Dot,
+            Token::Str("score".to_string()),
+            Token::Le,
+            Token::Int("100".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_value_negative_float() {
+        assert_tokens!(
+            ";top -3.14",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::Float("-3.14".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_value_quoted_string_with_escape() {
+        assert_tokens!(
+            r#";top "say \"hi\"""#,
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::Str(r#"say \"hi\""#.to_string()),
+        );
+    }
+
+    #[test]
+    fn test_error_bad_string_escape() {
+        assert_error_type!(r#";top "\z""#, LexErrorType::BadStringEscape);
+    }
+
+    #[test]
+    fn test_error_unrecognized_token() {
+        assert_error_type!(";top @value", LexErrorType::UnrecognizedToken('@'));
+    }
+
+    #[test]
+    fn test_empty_string_literal() {
+        assert_tokens!(
+            r#";top """#,
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::Str("".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_string_escape_newline() {
+        assert_tokens!(
+            r#";top "\n""#,
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::Str("\\n".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_string_escape_tab() {
+        assert_tokens!(
+            r#";top "\t""#,
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::Str("\\t".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_string_escape_backslash() {
+        assert_tokens!(
+            r#";top "\\""#,
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::Str("\\\\".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_number_zero() {
+        assert_tokens!(
+            ";top 0",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::Int("0".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_number_with_underscore() {
+        assert_tokens!(
+            ";top 1_000",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::Int("1000".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_operator_ge_symbol() {
+        assert_tokens!(
+            ";top >= 5",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::Ge,
+            Token::Int("5".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_error_multiple_unrecognized_tokens() {
+        assert_error_type!(
+            ";top @ # value",
+            LexErrorType::UnrecognizedToken('@'),
+            LexErrorType::UnrecognizedToken('#'),
+        );
+    }
+
+    #[test]
+    fn test_logic_with_subcommand() {
         assert_tokens!(
             ";top >> filter .title in { top blourgh >> map .title } or .acc > 98.5",
             Token::Semicolon,

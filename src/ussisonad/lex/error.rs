@@ -4,11 +4,11 @@ pub enum LexErrorType {
     UnfinishedDotAccess,
     UnexpectedStringEnd,
     UnexpectedEof,
-    UnrecognizedToken(char)
+    UnrecognizedToken(char),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct LexError {
-    pub error: LexErrorType,
+    pub kind: LexErrorType,
     pub location: (usize, usize),
 }

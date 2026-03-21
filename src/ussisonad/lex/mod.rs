@@ -3,7 +3,7 @@ mod lexer;
 mod token;
 
 pub(super) use self::{
-    error::{LexError},
+    error::LexError,
     lexer::{LexResult, Spanned, make_tokenizer},
-    token::{Token, }
+    token::Token,
 };

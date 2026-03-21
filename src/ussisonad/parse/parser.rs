@@ -4,39 +4,16 @@ use crate::ussisonad::lex::{LexResult, Spanned};
 use crate::ussisonad::parse::ast::{
     BinOp, BuiltinCommand, Command, CustomCommand, Expr, PipelineNode, SortDirection,
 };
+use crate::ussisonad::parse::error::ParserError;
 use std::collections::{HashMap, HashSet};
 use std::iter::Peekable;
+
+pub type ParserResult = Result<PipelineNode, ParserError>;
+pub type ParsingResult = Result<Expr, ParserError>;
 
 pub struct Parser<T: Iterator<Item = LexResult>> {
     tokens: Peekable<T>,
     lex_errors: Vec<LexError>,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct ParserError {
-    parsing_error: ParsingError,
-    lex_errors: Vec<LexError>,
-}
-
-impl ParserError {
-    fn new(parsing_error: ParsingError, lex_errors: Vec<LexError>) -> Self {
-        Self {
-            parsing_error,
-            lex_errors,
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum ParsingError {
-    UnexpectedToken(Spanned),
-    UnexpectedTokenWithContext(Token, Spanned),
-    ExpectedString(Spanned),
-    IntParseError(Spanned),
-    FloatParseError(Spanned),
-    EmptyVector((usize, usize)),
-    PrematureEOF(Spanned),
-    UnexpectedEOF,
 }
 
 impl<T: Iterator<Item = LexResult>> Parser<T> {
@@ -47,26 +24,48 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         }
     }
 
-    pub fn parse(&mut self) -> Result<PipelineNode, ParserError> {
+    pub fn parse(&mut self) -> ParserResult {
         self.expect(Token::Semicolon)
-            .map_err(|err| ParserError::new(err, vec![]))?;
+            .map_err(self.finalize_error())?;
 
-        let node = self
-            .parse_pipeline()
-            .map_err(|err| ParserError::new(err, self.lex_errors.clone()))?;
+        let node = self.parse_pipeline().map_err(self.finalize_error())?;
+
         match self.next() {
-            Some(span) => Err(ParserError::new(ParsingError::PrematureEOF(span), vec![])),
+            Some(span) => {
+                Err(ParserError::UnexpectedTrailingToken(span)).map_err(self.finalize_error())
+            }
             None => {
                 if self.lex_errors.is_empty() {
                     Ok(node)
                 } else {
-                    Err(ParserError::new(ParsingError::UnexpectedEOF, vec![]))
+                    Err(ParserError::Lex(
+                        None,
+                        self.get_lexing_errors().unwrap_or_default(),
+                    ))
                 }
             }
         }
     }
 
-    fn parse_pipeline(&mut self) -> Result<PipelineNode, ParsingError> {
+    fn finalize_error(&mut self) -> impl Fn(ParserError) -> ParserError {
+        let lex_errors = self.lex_errors.clone();
+        move |err| {
+            if lex_errors.is_empty() {
+                err
+            } else {
+                ParserError::Lex(Some(Box::new(err)), lex_errors.clone())
+            }
+        }
+    }
+
+    fn get_lexing_errors(&self) -> Option<Vec<LexError>> {
+        match self.lex_errors[..] {
+            [] => None,
+            _ => Some(self.lex_errors.clone()),
+        }
+    }
+
+    fn parse_pipeline(&mut self) -> Result<PipelineNode, ParserError> {
         let left = self.parse_command()?;
         let mut node = PipelineNode::Command(left);
 
@@ -85,8 +84,8 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
                         self.next();
                         let rhs = self.parse_command()?;
                         node = PipelineNode::Concat {
-                            left: Box::new(node),
-                            right: Box::new(PipelineNode::Command(rhs)),
+                            lhs: Box::new(node),
+                            rhs: Box::new(PipelineNode::Command(rhs)),
                         };
                     }
                     _ => break,
@@ -99,21 +98,32 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         Ok(node)
     }
 
-    fn parse_command(&mut self) -> Result<Command, ParsingError> {
-        match self.peek().ok_or(ParsingError::UnexpectedEOF)? {
+    fn parse_command(&mut self) -> Result<Command, ParserError> {
+        match self.peek().ok_or(ParserError::UnexpectedEOF)? {
             Token::Filter => self.parse_filter(),
             Token::Sort => self.parse_sort(),
             Token::Take => self.parse_take(),
+            Token::Map => self.parse_map(),
+            Token::Unique => self.parse_unique(),
             Token::Count => {
                 self.next();
                 Ok(Command::Builtin(BuiltinCommand::Count))
             }
             Token::Str(_) => self.parse_custom_command(),
-            _ => Err(ParsingError::UnexpectedToken(self.next().unwrap())),
+            _ => Err(ParserError::UnexpectedToken(self.next().unwrap())),
         }
     }
 
-    fn parse_custom_command(&mut self) -> Result<Command, ParsingError> {
+    fn parse_unique(&mut self) -> Result<Command, ParserError> {
+        self.next();
+        let field = match self.peek() {
+            Some(Token::Dot) => Some(self.parse_expr(0)?),
+            _ => None,
+        };
+        Ok(Command::Builtin(BuiltinCommand::Unique(field)))
+    }
+
+    fn parse_custom_command(&mut self) -> Result<Command, ParserError> {
         let name = self.expect_str()?;
         let mut args = Vec::new();
         let mut flags = HashSet::new();
@@ -146,7 +156,11 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
 
         let command = CustomCommand {
             name,
-            args,
+            arg: match args.len() {
+                0 => None,
+                1 => Some(args.remove(0)),
+                _ => Some(Expr::Vector(args)),
+            },
             flags,
             options,
         };
@@ -154,45 +168,60 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         Ok(Command::Custom(command))
     }
 
-    fn parse_filter(&mut self) -> Result<Command, ParsingError> {
+    fn parse_filter(&mut self) -> Result<Command, ParserError> {
         self.next();
         let expr = self.parse_expr(0)?;
         Ok(Command::Builtin(BuiltinCommand::Filter(expr)))
     }
 
-    fn parse_sort(&mut self) -> Result<Command, ParsingError> {
+    fn parse_map(&mut self) -> Result<Command, ParserError> {
         self.next();
-        let field = self.parse_expr(0)?;
-        let direction = match self.peek() {
-            Some(Token::Str(s)) if s == "asc" => {
-                self.next();
-                SortDirection::Asc
+        let expr = self.parse_expr(0)?;
+        Ok(Command::Builtin(BuiltinCommand::Map(expr)))
+    }
+
+    fn parse_sort(&mut self) -> Result<Command, ParserError> {
+        self.next();
+
+        let mut field = Expr::It;
+        let mut direction = SortDirection::Desc;
+
+        loop {
+            match self.peek() {
+                Some(Token::GtGt) | Some(Token::EOF) | None => break,
+                Some(Token::Sub) | Some(Token::SubSub) => {
+                    self.next();
+                    direction = match self.next() {
+                        Some((Token::Str(s), _, _)) if s == "asc" => SortDirection::Asc,
+                        Some((Token::Str(s), _, _)) if s == "desc" => SortDirection::Desc,
+                        Some(actual) => return Err(ParserError::UnexpectedToken(actual)),
+                        None => return Err(ParserError::UnexpectedEOF),
+                    }
+                }
+                _ => field = self.parse_expr(0)?,
             }
-            Some(Token::Str(s)) if s == "desc" => {
-                self.next();
-                SortDirection::Desc
-            }
-            _ => SortDirection::Desc,
-        };
+        }
+
         Ok(Command::Builtin(BuiltinCommand::Sort { field, direction }))
     }
 
-    fn parse_take(&mut self) -> Result<Command, ParsingError> {
+    fn parse_take(&mut self) -> Result<Command, ParserError> {
         self.next();
         let n = match self.next() {
             Some((Token::Int(s), start, end)) => Self::parse_int(s, start, end)?,
-            Some(t) => return Err(ParsingError::UnexpectedToken(t)),
-            None => return Err(ParsingError::UnexpectedEOF),
+            Some(t) => return Err(ParserError::UnexpectedToken(t)),
+            None => return Err(ParserError::UnexpectedEOF),
         };
         Ok(Command::Builtin(BuiltinCommand::Limit(n as u64)))
     }
 
-    fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, ParsingError> {
-        let (tok, start, end) = self.next().ok_or(ParsingError::UnexpectedEOF)?;
+    fn parse_expr(&mut self, min_bp: u8) -> ParsingResult {
+        let (tok, start, end) = self.next().ok_or(ParserError::UnexpectedEOF)?;
 
         let mut lhs = match tok {
             Token::Str(s) => Expr::Str(s),
             Token::Bool(b) => Expr::Bool(b),
+            Token::It => Expr::It,
             Token::Int(s) => self.parse_int_expr((Token::Int(s), start, end))?,
             Token::Float(s) => self.parse_float_expr((Token::Float(s), start, end))?,
             Token::Dot => self.parse_field_path()?,
@@ -202,7 +231,7 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
                 Expr::Not(Box::new(rhs))
             }
 
-            tok => return Err(ParsingError::UnexpectedToken((tok, start, end))),
+            tok => return Err(ParserError::UnexpectedToken((tok, start, end))),
         };
 
         loop {
@@ -235,7 +264,7 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         Ok(lhs)
     }
 
-    fn parse_field_path(&mut self) -> Result<Expr, ParsingError> {
+    fn parse_field_path(&mut self) -> ParsingResult {
         let mut segments = Vec::new();
         segments.push(self.expect_str()?);
 
@@ -247,15 +276,15 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         Ok(Expr::FieldPath(segments))
     }
 
-    fn parse_group(&mut self, left_paren_pos: usize) -> Result<Expr, ParsingError> {
+    fn parse_group(&mut self, left_paren_pos: usize) -> ParsingResult {
         let mut exprs: Vec<Expr> = Vec::new();
 
         loop {
-            let (tok, pos, _) = self.peek_span().ok_or(ParsingError::UnexpectedEOF)?;
+            let (tok, pos, _) = self.peek_span().ok_or(ParserError::UnexpectedEOF)?;
             match tok {
                 Token::RightParen => {
                     let expr = match exprs[..] {
-                        [] => return Err(ParsingError::EmptyVector((left_paren_pos, *pos))),
+                        [] => return Err(ParserError::EmptyVector((left_paren_pos, *pos))),
                         [Expr::Binary { .. }] => exprs.pop().unwrap(),
                         _ => Expr::Vector(exprs),
                     };
@@ -272,27 +301,27 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         }
     }
 
-    fn parse_int_expr(&mut self, spanned: Spanned) -> Result<Expr, ParsingError> {
+    fn parse_int_expr(&mut self, spanned: Spanned) -> ParsingResult {
         let (tok, start, end) = spanned;
         match tok {
             Token::Int(s) => Ok(Expr::Int(Self::parse_int(s, start, end)?)),
-            _ => Err(ParsingError::IntParseError((tok, start, end))),
+            _ => Err(ParserError::IntParseError((tok, start, end))),
         }
     }
 
-    fn parse_int(s: String, start: usize, end: usize) -> Result<i64, ParsingError> {
+    fn parse_int(s: String, start: usize, end: usize) -> Result<i64, ParserError> {
         s.parse::<i64>()
-            .map_err(|_| ParsingError::IntParseError((Token::Int(s), start, end)))
+            .map_err(|_| ParserError::IntParseError((Token::Int(s), start, end)))
     }
 
-    fn parse_float_expr(&mut self, spanned: Spanned) -> Result<Expr, ParsingError> {
+    fn parse_float_expr(&mut self, spanned: Spanned) -> ParsingResult {
         let (tok, start, end) = spanned;
         match tok {
             Token::Float(s) => s
                 .parse::<f64>()
                 .map(|f| Expr::Float(f))
-                .map_err(|_| ParsingError::FloatParseError((Token::Float(s), start, end))),
-            _ => Err(ParsingError::FloatParseError((tok, start, end))),
+                .map_err(|_| ParserError::FloatParseError((Token::Float(s), start, end))),
+            _ => Err(ParserError::FloatParseError((tok, start, end))),
         }
     }
 
@@ -302,6 +331,7 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
             Token::Sub => Some(BinOp::Sub),
             Token::Mul => Some(BinOp::Mul),
             Token::Div => Some(BinOp::Div),
+            Token::DivDiv => Some(BinOp::DivDiv),
             Token::Mod => Some(BinOp::Mod),
             Token::Eq => Some(BinOp::Eq),
             Token::Ne => Some(BinOp::Ne),
@@ -349,19 +379,19 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         self.peek_span().map(|span| &span.0)
     }
 
-    fn expect(&mut self, expected: Token) -> Result<(), ParsingError> {
+    fn expect(&mut self, expected: Token) -> Result<(), ParserError> {
         match self.next() {
             Some((tok, _, _)) if tok == expected => Ok(()),
-            Some(actual) => Err(ParsingError::UnexpectedTokenWithContext(expected, actual)),
-            None => Err(ParsingError::UnexpectedEOF),
+            Some(actual) => Err(ParserError::UnexpectedTokenWithContext(expected, actual)),
+            None => Err(ParserError::UnexpectedEOF),
         }
     }
 
-    fn expect_str(&mut self) -> Result<String, ParsingError> {
+    fn expect_str(&mut self) -> Result<String, ParserError> {
         match self.next() {
             Some((Token::Str(s), _, _)) => Ok(s),
-            Some(actual) => Err(ParsingError::ExpectedString(actual)),
-            None => Err(ParsingError::UnexpectedEOF),
+            Some(actual) => Err(ParserError::ExpectedString(actual)),
+            None => Err(ParserError::UnexpectedEOF),
         }
     }
 }
@@ -372,6 +402,7 @@ mod tests {
     use crate::ussisonad::parse::ast::{
         BinOp, BuiltinCommand, Command, CustomCommand, Expr, PipelineNode, SortDirection,
     };
+    use crate::ussisonad::parse::error::ParserError;
     use crate::ussisonad::parse::parser::Parser;
     use std::collections::{HashMap, HashSet};
 
@@ -391,7 +422,7 @@ mod tests {
     fn custom(name: &str) -> Command {
         Command::Custom(CustomCommand {
             name: name.to_string(),
-            args: vec![],
+            arg: None,
             flags: HashSet::new(),
             options: HashMap::new(),
         })
@@ -433,7 +464,7 @@ mod tests {
     #[test]
     fn test_sort_asc() {
         assert_ast!(
-            ";sort .bpm asc",
+            ";sort .bpm --asc",
             cmd(Command::Builtin(BuiltinCommand::Sort {
                 field: field(&["bpm"]),
                 direction: SortDirection::Asc,
@@ -444,7 +475,7 @@ mod tests {
     #[test]
     fn test_sort_desc_explicit() {
         assert_ast!(
-            ";sort .bpm desc",
+            ";sort .bpm --desc",
             cmd(Command::Builtin(BuiltinCommand::Sort {
                 field: field(&["bpm"]),
                 direction: SortDirection::Desc,
@@ -455,7 +486,7 @@ mod tests {
     #[test]
     fn test_order_keyword_alias() {
         assert_ast!(
-            ";order .name asc",
+            ";order .name --asc",
             cmd(Command::Builtin(BuiltinCommand::Sort {
                 field: field(&["name"]),
                 direction: SortDirection::Asc,
@@ -779,7 +810,7 @@ mod tests {
             ";top chocomint",
             cmd(Command::Custom(CustomCommand {
                 name: "top".to_string(),
-                args: vec![Expr::Str("chocomint".to_string())],
+                arg: Some(Expr::Str("chocomint".to_string())),
                 flags: HashSet::new(),
                 options: HashMap::new(),
             }))
@@ -792,7 +823,7 @@ mod tests {
             ";recent 5",
             cmd(Command::Custom(CustomCommand {
                 name: "recent".to_string(),
-                args: vec![Expr::Int(5)],
+                arg: Some(Expr::Int(5)),
                 flags: HashSet::new(),
                 options: HashMap::new(),
             }))
@@ -805,7 +836,10 @@ mod tests {
             ";search hello 42",
             cmd(Command::Custom(CustomCommand {
                 name: "search".to_string(),
-                args: vec![Expr::Str("hello".to_string()), Expr::Int(42)],
+                arg: Some(Expr::Vector(vec![
+                    Expr::Str("hello".to_string()),
+                    Expr::Int(42)
+                ])),
                 flags: HashSet::new(),
                 options: HashMap::new(),
             }))
@@ -818,7 +852,7 @@ mod tests {
             ";top --global",
             cmd(Command::Custom(CustomCommand {
                 name: "top".to_string(),
-                args: vec![],
+                arg: None,
                 flags: {
                     let mut s = HashSet::new();
                     s.insert("global".to_string());
@@ -835,7 +869,7 @@ mod tests {
             ";top --global --recent",
             cmd(Command::Custom(CustomCommand {
                 name: "top".to_string(),
-                args: vec![],
+                arg: None,
                 flags: ["global", "recent"].iter().map(|s| s.to_string()).collect(),
                 options: HashMap::new(),
             }))
@@ -848,7 +882,7 @@ mod tests {
             ";top --limit 10",
             cmd(Command::Custom(CustomCommand {
                 name: "top".to_string(),
-                args: vec![],
+                arg: None,
                 flags: HashSet::new(),
                 options: [("limit".to_string(), Expr::Int(10))].into(),
             }))
@@ -861,7 +895,7 @@ mod tests {
             ";top --mode standard",
             cmd(Command::Custom(CustomCommand {
                 name: "top".to_string(),
-                args: vec![],
+                arg: None,
                 flags: HashSet::new(),
                 options: [("mode".to_string(), Expr::Str("standard".to_string()))].into(),
             }))
@@ -874,7 +908,7 @@ mod tests {
             ";top chocomint --global --limit 5",
             cmd(Command::Custom(CustomCommand {
                 name: "top".to_string(),
-                args: vec![Expr::Str("chocomint".to_string())],
+                arg: Some(Expr::Str("chocomint".to_string())),
                 flags: {
                     let mut s = HashSet::new();
                     s.insert("global".to_string());
@@ -901,8 +935,8 @@ mod tests {
         assert_ast!(
             ";top with recent",
             PipelineNode::Concat {
-                left: Box::new(cmd(custom("top"))),
-                right: Box::new(cmd(custom("recent"))),
+                lhs: Box::new(cmd(custom("top"))),
+                rhs: Box::new(cmd(custom("recent"))),
             }
         );
     }
@@ -912,8 +946,8 @@ mod tests {
         assert_ast!(
             ";top ++ recent",
             PipelineNode::Concat {
-                left: Box::new(cmd(custom("top"))),
-                right: Box::new(cmd(custom("recent"))),
+                lhs: Box::new(cmd(custom("top"))),
+                rhs: Box::new(cmd(custom("recent"))),
             }
         );
     }
@@ -939,13 +973,52 @@ mod tests {
     #[test]
     fn test_pipe_into_sort() {
         assert_ast!(
-            ";top >> sort .bpm asc",
+            ";top >> sort .bpm --asc",
             PipelineNode::Pipe {
                 lhs: Box::new(cmd(custom("top"))),
                 rhs: Box::new(cmd(Command::Builtin(BuiltinCommand::Sort {
                     field: field(&["bpm"]),
                     direction: SortDirection::Asc,
                 }))),
+            }
+        );
+    }
+
+    #[test]
+    fn test_map_field() {
+        assert_ast!(
+            ";top >> map .title",
+            PipelineNode::Pipe {
+                lhs: Box::new(cmd(custom("top"))),
+                rhs: Box::new(cmd(Command::Builtin(BuiltinCommand::Map(field(&[
+                    "title"
+                ]))))),
+            }
+        );
+    }
+
+    #[test]
+    fn test_map_it() {
+        assert_ast!(
+            ";top >> map it",
+            PipelineNode::Pipe {
+                lhs: Box::new(cmd(custom("top"))),
+                rhs: Box::new(cmd(Command::Builtin(BuiltinCommand::Map(Expr::It)))),
+            }
+        );
+    }
+
+    #[test]
+    fn test_map_arithmetic() {
+        assert_ast!(
+            ";top >> map it * 2",
+            PipelineNode::Pipe {
+                lhs: Box::new(cmd(custom("top"))),
+                rhs: Box::new(cmd(Command::Builtin(BuiltinCommand::Map(binary(
+                    Expr::It,
+                    BinOp::Mul,
+                    Expr::Int(2),
+                ))))),
             }
         );
     }
@@ -967,5 +1040,90 @@ mod tests {
                 ))))),
             }
         );
+    }
+
+    #[test]
+    fn test_filter_sub() {
+        assert_ast!(
+            ";filter it - 1 > 0",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                binary(Expr::It, BinOp::Sub, Expr::Int(1)),
+                BinOp::Gt,
+                Expr::Int(0),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_div() {
+        assert_ast!(
+            ";filter it / 2 > 1",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                binary(Expr::It, BinOp::Div, Expr::Int(2)),
+                BinOp::Gt,
+                Expr::Int(1),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_map_sub() {
+        assert_ast!(
+            ";top >> map it - 1",
+            PipelineNode::Pipe {
+                lhs: Box::new(cmd(custom("top"))),
+                rhs: Box::new(cmd(Command::Builtin(BuiltinCommand::Map(binary(
+                    Expr::It,
+                    BinOp::Sub,
+                    Expr::Int(1),
+                ))))),
+            }
+        );
+    }
+
+    #[test]
+    fn test_error_no_leading_semicolon() {
+        let toks = make_tokenizer("count");
+        let mut parser = Parser::new(toks);
+        let result = parser.parse();
+        assert!(matches!(
+            result,
+            Err(ParserError::UnexpectedTokenWithContext(..))
+        ));
+    }
+
+    #[test]
+    fn test_error_premature_eof() {
+        let toks = make_tokenizer(";count extra");
+        let mut parser = Parser::new(toks);
+        let result = parser.parse();
+        assert!(matches!(
+            result,
+            Err(ParserError::UnexpectedTrailingToken(..))
+        ));
+    }
+
+    #[test]
+    fn test_error_unexpected_eof_in_filter() {
+        let toks = make_tokenizer(";filter");
+        let mut parser = Parser::new(toks);
+        let result = parser.parse();
+        assert!(matches!(result, Err(ParserError::UnexpectedEOF)));
+    }
+
+    #[test]
+    fn test_error_empty_vector_in_filter() {
+        let toks = make_tokenizer(";filter ()");
+        let mut parser = Parser::new(toks);
+        let result = parser.parse();
+        assert!(matches!(result, Err(ParserError::EmptyVector(..))));
+    }
+
+    #[test]
+    fn test_error_expected_string_for_option_key() {
+        let toks = make_tokenizer(";top --5");
+        let mut parser = Parser::new(toks);
+        let result = parser.parse();
+        assert!(matches!(result, Err(ParserError::ExpectedString(..))));
     }
 }

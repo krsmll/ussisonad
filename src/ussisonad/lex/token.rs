@@ -16,6 +16,8 @@ pub enum Token {
     Count,
     Take,
     Map,
+    Unique,
+    It,
 
     // Logical operators
     Or,
@@ -37,21 +39,22 @@ pub enum Token {
     Sub,
     Mul,
     Div,
+    DivDiv,
     Mod,
 
     // Vectors
-    LeftParen, 
+    LeftParen,
     RightParen,
 
     // Independent scope
-    LeftBrace, 
+    LeftBrace,
     RightBrace,
-    
+
     Dot,
     Comma,
     Semicolon,
     SubSub,
-    
+
     // Pipeline operators
     GtGt,
     AddAdd,
@@ -62,9 +65,11 @@ impl Token {
         match s {
             "filter" | "where" => Some(Token::Filter),
             "sort" | "order" => Some(Token::Sort),
+            "self" | "it" => Some(Token::It),
             "count" => Some(Token::Count),
             "take" => Some(Token::Take),
             "map" => Some(Token::Map),
+            "unique" => Some(Token::Unique),
             "or" => Some(Token::Or),
             "and" => Some(Token::And),
             "not" => Some(Token::Not),
@@ -92,11 +97,14 @@ impl fmt::Display for Token {
                     "false"
                 }
             }
+            Token::Contains => "contains",
             Token::Filter => "filter",
             Token::Sort => "sort",
             Token::Count => "count",
             Token::Take => "take",
             Token::Map => "map",
+            Token::Unique => "unique",
+            Token::It => "it",
             Token::Eq => "=",
             Token::Ne => "!=",
             Token::Gt => ">",
@@ -106,7 +114,6 @@ impl fmt::Display for Token {
             Token::Or => "or",
             Token::And => "and",
             Token::In => "in",
-            Token::Contains => "contains",
             Token::Not => "not",
             Token::LeftParen => "(",
             Token::RightParen => ")",
@@ -116,6 +123,7 @@ impl fmt::Display for Token {
             Token::Sub => "-",
             Token::Mul => "*",
             Token::Div => "/",
+            Token::DivDiv => "/",
             Token::Mod => "%",
             Token::Dot => ".",
             Token::Comma => ",",
