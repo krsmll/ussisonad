@@ -111,7 +111,7 @@ impl Evaluator {
                 Ok(Value::Bool(true)) => Some(Ok(item)),
                 Ok(Value::Bool(false) | Value::None) => None,
                 Ok(other) => Some(Err(EvalError::TypeMismatch {
-                    expected: "bool",
+                    expected: "boolean",
                     got: other.type_name(),
                 })),
                 Err(e) => Some(Err(e)),
@@ -163,15 +163,15 @@ impl Evaluator {
         cmd: &ast::CustomCommand,
         input: Value,
     ) -> Result<Value, EvalError> {
-        let cfg = self
+        let def = self
             .registry
             .get_command(&cmd.name)
             .ok_or_else(|| EvalError::UnknownCommand(cmd.name.clone()))?;
 
-        if !cfg.depends_on.is_empty() && !cfg.depends_on.iter().any(|t| t.matches(&input)) {
+        if !def.depends_on.is_empty() && !def.depends_on.iter().any(|t| t.matches(&input)) {
             return Err(EvalError::UnexpectedInputType {
                 command: cmd.name.clone(),
-                expected: cfg.depends_on.clone(),
+                expected: def.depends_on.clone(),
                 got: input.type_name(),
             });
         }
@@ -181,7 +181,8 @@ impl Evaluator {
             Some(arg) => self.eval_expr(arg, &input)?,
         };
 
-        if let Some(arg_schema) = &cfg.arg
+        if let Some(arg_schema) = &def.arg
+            && arg_schema.required
             && !arg_schema.accepts.is_empty()
             && !arg_schema.accepts.iter().any(|t| t.matches(&arg))
         {
@@ -204,16 +205,16 @@ impl Evaluator {
             options,
         };
 
-        let result = cfg
+        let result = def
             .handler
-            .execute(&input, command_input)
+            .execute(input, command_input)
             .await
             .map_err(EvalError::Handler)?;
 
-        if !cfg.returns.matches(&result) {
+        if !def.returns.matches(&result) {
             return Err(EvalError::UnexpectedReturnType {
                 command: cmd.name.clone(),
-                expected: cfg.returns.clone(),
+                expected: def.returns.clone(),
                 got: result.type_name(),
             });
         }
@@ -255,7 +256,7 @@ impl Evaluator {
             ast::Expr::Not(inner) => match self.eval_expr(inner, context)? {
                 Value::Bool(b) => Ok(Value::Bool(!b)),
                 other => Err(EvalError::TypeMismatch {
-                    expected: "bool",
+                    expected: "boolean",
                     got: other.type_name(),
                 }),
             },
@@ -268,7 +269,7 @@ impl Evaluator {
                             Value::Bool(true) => self.eval_expr(rhs, context),
                             Value::Bool(false) => Ok(Value::Bool(false)),
                             _ => Err(EvalError::TypeMismatch {
-                                expected: "bool",
+                                expected: "boolean",
                                 got: l.type_name(),
                             }),
                         };
@@ -280,7 +281,7 @@ impl Evaluator {
                             Value::Bool(true) => Ok(Value::Bool(true)),
                             Value::Bool(false) => self.eval_expr(rhs, context),
                             _ => Err(EvalError::TypeMismatch {
-                                expected: "bool",
+                                expected: "boolean",
                                 got: l.type_name(),
                             }),
                         };
@@ -330,7 +331,7 @@ impl Evaluator {
                 },
 
                 _ => Err(EvalError::TypeMismatch {
-                    expected: "vector or string",
+                    expected: "list or string",
                     got: rhs.type_name(),
                 }),
             },
@@ -347,7 +348,7 @@ impl Evaluator {
                 },
 
                 _ => Err(EvalError::TypeMismatch {
-                    expected: "vector or string",
+                    expected: "list or string",
                     got: rhs.type_name(),
                 }),
             },
@@ -380,15 +381,15 @@ impl Evaluator {
 
             (Value::Float(a), Value::Float(b)) => a
                 .partial_cmp(b)
-                .ok_or(EvalError::NotComparable("float", "float")),
+                .ok_or(EvalError::NotComparable("decimal", "decimal")),
 
             (Value::Int(a), Value::Float(b)) => (*a as f64)
                 .partial_cmp(b)
-                .ok_or(EvalError::NotComparable("int", "float")),
+                .ok_or(EvalError::NotComparable("integer", "decimal")),
 
             (Value::Float(a), Value::Int(b)) => a
                 .partial_cmp(&(*b as f64))
-                .ok_or(EvalError::NotComparable("float", "int")),
+                .ok_or(EvalError::NotComparable("decimal", "integer")),
 
             (Value::Str(a), Value::Str(b)) => Ok(a.cmp(b)),
             _ => Err(EvalError::NotComparable(a.type_name(), b.type_name())),
@@ -458,28 +459,20 @@ mod tests {
     impl CommandHandler for RangeHandler {
         async fn execute(
             &self,
-            _context: &Value,
+            _context: Value,
             input: CommandInput,
         ) -> Result<Value, CommandError> {
-            let n = input.arg;
+            match input.arg {
+                Value::Int(n) if n < 0 => Err(CommandError::InvalidArgument(format!(
+                    "n must be non-negative, got {n}"
+                ))),
 
-            let n = match n {
-                Value::Int(n) => n,
-                other => {
-                    return Err(CommandError::TypeMismatch {
-                        expected: "int",
-                        got: other.type_name(),
-                    });
-                }
-            };
+                Value::Int(n) => Ok(Value::Vector((0..=n).map(Value::Int).collect())),
 
-            if n < 0 {
-                Err(CommandError::InvalidArgument(format!(
-                    "n must be non-negative, got {}",
-                    n
-                )))
-            } else {
-                Ok(Value::Vector((0..=n).map(Value::Int).collect()))
+                other => Err(CommandError::TypeMismatch {
+                    expected: vec![ValueType::Int],
+                    got: other.type_name(),
+                }),
             }
         }
     }
@@ -490,7 +483,7 @@ mod tests {
     impl CommandHandler for MultiplyEachHandler {
         async fn execute(
             &self,
-            context: &Value,
+            context: Value,
             input: CommandInput,
         ) -> Result<Value, CommandError> {
             let factor = input.arg;
@@ -498,7 +491,7 @@ mod tests {
                 Value::Int(n) => n,
                 other => {
                     return Err(CommandError::TypeMismatch {
-                        expected: "int",
+                        expected: vec![ValueType::Int],
                         got: other.type_name(),
                     });
                 }
@@ -514,7 +507,7 @@ mod tests {
                         .map(|item| match item {
                             Value::Int(n) => Ok(Value::Int(n * factor)),
                             other => Err(CommandError::TypeMismatch {
-                                expected: "int",
+                                expected: vec![ValueType::Int],
                                 got: other.type_name(),
                             }),
                         })
@@ -523,7 +516,7 @@ mod tests {
                 }
 
                 other => Err(CommandError::TypeMismatch {
-                    expected: "int or vector",
+                    expected: vec![ValueType::Int, ValueType::Vector(Box::new(ValueType::Int))],
                     got: other.type_name(),
                 }),
             }
@@ -536,7 +529,7 @@ mod tests {
     impl CommandHandler for ItemsHandler {
         async fn execute(
             &self,
-            _context: &Value,
+            _context: Value,
             _input: CommandInput,
         ) -> Result<Value, CommandError> {
             Ok(Value::Vector(vec![
@@ -562,7 +555,7 @@ mod tests {
     impl CommandHandler for MultiplyHandler {
         async fn execute(
             &self,
-            context: &Value,
+            context: Value,
             _input: CommandInput,
         ) -> Result<Value, CommandError> {
             match context {
@@ -579,10 +572,81 @@ mod tests {
                 }
 
                 other => Err(CommandError::TypeMismatch {
-                    expected: "vector",
+                    expected: vec![ValueType::Vector(Box::new(ValueType::Int))],
                     got: other.type_name(),
                 }),
             }
+        }
+    }
+
+    struct GreetHandler;
+
+    impl GreetHandler {
+        const DEFAULT_TARGET: &'static str = "buddy";
+
+        fn target_name(input: &CommandInput) -> String {
+            match &input.arg {
+                Value::Str(s) => s.clone(),
+                _ => Self::DEFAULT_TARGET.to_string(),
+            }
+        }
+
+        fn validate_flags(input: &CommandInput) -> Result<(), CommandError> {
+            let upper = input.has_flag("upper");
+            let lower = input.has_flag("lower");
+
+            if upper && lower {
+                return Err(CommandError::FlagConflict(vec!["upper", "lower"]));
+            }
+
+            Ok(())
+        }
+
+        fn format_silly(target_name: &str, lower: bool) -> Value {
+            if lower {
+                Value::Str(format!(
+                    "｡･ﾟﾟ*(>д<)*ﾟﾟ･｡ hallo... {}... ｡･ﾟﾟ*(>д<)*ﾟﾟ･｡",
+                    target_name.to_lowercase()
+                ))
+            } else {
+                Value::Str(format!(
+                    "☆*:.｡.o(≧▽≦)o.｡.:*☆ HALLO {}!! ☆*:.｡.o(≧▽≦)o.｡.:*☆",
+                    target_name
+                ))
+            }
+        }
+
+        fn format_standard(target_name: &str, upper: bool, lower: bool) -> Value {
+            if upper {
+                Value::Str(format!("HELLO, {}!", target_name.to_uppercase()))
+            } else if lower {
+                Value::Str(format!("hello, {}!", target_name.to_lowercase()))
+            } else {
+                Value::Str(format!("Hello, {}!", target_name))
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CommandHandler for GreetHandler {
+        async fn execute(
+            &self,
+            _context: Value,
+            input: CommandInput,
+        ) -> Result<Value, CommandError> {
+            Self::validate_flags(&input)?;
+            let target_name = Self::target_name(&input);
+            let silly = input.has_flag("silly");
+            let uppercase = input.has_flag("upper");
+            let lowercase = input.has_flag("lower");
+
+            let value = if silly {
+                Self::format_silly(&target_name, lowercase)
+            } else {
+                Self::format_standard(&target_name, uppercase, lowercase)
+            };
+
+            Ok(value)
         }
     }
 
@@ -644,6 +708,16 @@ mod tests {
                     .depends_on(ValueType::Vector(Box::new(ValueType::Int)))
                     .returns(ValueType::Vector(Box::new(ValueType::Int)))
                     .handler(MultiplyEachHandler),
+            )
+            .register(
+                CommandDefinition::builder()
+                    .name("greet")
+                    .arg(ArgSchema::builder().name("name").accepts(ValueType::Str))
+                    .flag("upper")
+                    .flag("lower")
+                    .flag("silly")
+                    .returns(ValueType::Str)
+                    .handler(GreetHandler),
             )
             .build()
     }
@@ -946,7 +1020,7 @@ mod tests {
         assert_expr_err!(
             ";range 3 >> filter it + 1",
             EvalError::TypeMismatch {
-                expected: "bool",
+                expected: "boolean",
                 ..
             }
         );
@@ -1052,6 +1126,27 @@ mod tests {
         assert_expr_err!(
             ";range 3 >> multiply_each hello",
             EvalError::UnexpectedArgumentType { .. }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flags() {
+        assert_expr!(";greet --upper", Value::Str("HELLO, BUDDY!".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_args_and_flags_together() {
+        assert_expr!(
+            ";greet kris --upper",
+            Value::Str("HELLO, KRIS!".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multiple_flags() {
+        assert_expr!(
+            ";greet --lower --silly",
+            Value::Str("｡･ﾟﾟ*(>д<)*ﾟﾟ･｡ hallo... buddy... ｡･ﾟﾟ*(>д<)*ﾟﾟ･｡".to_string())
         );
     }
 }

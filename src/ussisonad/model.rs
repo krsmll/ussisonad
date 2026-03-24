@@ -10,8 +10,9 @@ pub enum CommandError {
     External(Box<dyn Error + Send + Sync>),
     MissingArgument(&'static str),
     InvalidArgument(String),
+    FlagConflict(Vec<&'static str>),
     TypeMismatch {
-        expected: &'static str,
+        expected: Vec<ValueType>,
         got: &'static str,
     },
 }
@@ -22,7 +23,21 @@ impl fmt::Display for CommandError {
             CommandError::External(e) => write!(f, "{e}"),
             CommandError::MissingArgument(name) => write!(f, "missing required argument: {name}"),
             CommandError::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
+            CommandError::FlagConflict(conflicting) => {
+                let conflicting = conflicting
+                    .iter()
+                    .map(|s| format!("'{s}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                write!(f, "incompatible flags: {conflicting}")
+            }
             CommandError::TypeMismatch { expected, got } => {
+                let expected = expected
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 write!(f, "type mismatch: expected {expected}, got {got}")
             }
         }
@@ -242,10 +257,10 @@ impl Value {
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::None => "null",
-            Value::Bool(_) => "bool",
-            Value::Int(_) => "int",
-            Value::Float(_) => "float",
-            Value::Str(_) => "str",
+            Value::Bool(_) => "boolean",
+            Value::Int(_) => "integer",
+            Value::Float(_) => "decimal",
+            Value::Str(_) => "string",
             Value::Vector(_) => "vec",
             Value::Object(_) => "obj",
         }
@@ -255,7 +270,7 @@ impl Value {
         match self {
             Value::Vector(items) => Ok(items),
             other => Err(EvalError::TypeMismatch {
-                expected: "vector",
+                expected: "list",
                 got: other.type_name(),
             }),
         }
@@ -264,6 +279,7 @@ impl Value {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValueType {
+    None,
     Bool,
     Int,
     Float,
@@ -295,12 +311,13 @@ impl ValueType {
 impl fmt::Display for ValueType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ValueType::Bool => write!(f, "bool"),
-            ValueType::Int => write!(f, "int"),
-            ValueType::Float => write!(f, "float"),
-            ValueType::Str => write!(f, "str"),
-            ValueType::Vector(inner) => write!(f, "vec<{inner}>"),
-            ValueType::Object(schema) => write!(f, "obj<{}>", schema.name),
+            ValueType::None => write!(f, "none"),
+            ValueType::Bool => write!(f, "boolean"),
+            ValueType::Int => write!(f, "integer"),
+            ValueType::Float => write!(f, "decimal"),
+            ValueType::Str => write!(f, "string"),
+            ValueType::Vector(inner) => write!(f, "list<{inner}>"),
+            ValueType::Object(schema) => write!(f, "object<{}>", schema.name),
         }
     }
 }
@@ -449,9 +466,19 @@ pub struct CommandInput {
     pub options: HashMap<String, Value>,
 }
 
+impl CommandInput {
+    pub fn has_flag(&self, flag: &str) -> bool {
+        self.flags.contains(flag)
+    }
+
+    pub fn get_option(&self, option_name: &str) -> Option<&Value> {
+        self.options.get(option_name)
+    }
+}
+
 #[async_trait]
 pub trait CommandHandler: Send + Sync {
-    async fn execute(&self, context: &Value, input: CommandInput) -> Result<Value, CommandError>;
+    async fn execute(&self, context: Value, input: CommandInput) -> Result<Value, CommandError>;
 }
 
 pub struct CommandDefinition {
@@ -548,6 +575,7 @@ impl CommandDefinitionBuilder {
         self.handler = Some(Box::new(handler));
         self
     }
+
     pub fn build(self) -> Result<CommandDefinition, ConfigError> {
         let name = require_string(
             self.name,
@@ -709,6 +737,10 @@ impl ArgSchema {
     #[must_use]
     pub fn builder() -> ArgSchemaBuilder {
         ArgSchemaBuilder::default()
+    }
+
+    pub fn accepts(&self, value: &Value) -> bool {
+        self.accepts.iter().any(|accept| accept.matches(value))
     }
 }
 
