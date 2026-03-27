@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     It,
+    Each,
     Str(String),
     Int(i64),
     Float(f64),
@@ -94,6 +95,7 @@ pub struct CustomCommand {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BuiltinCommand {
+    With(Expr),
     Filter(Expr),
     Sort {
         field: Expr,

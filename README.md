@@ -2,16 +2,11 @@
 
 silly little dsl for my discord bot that will never go live
 
-## Example:
+## Examples:
+
+Simple greeting command:
 
 ```rust
-use async_trait::async_trait;
-use std::sync::Arc;
-use ussisonad::{
-    ArgSchema, CommandDefinition, CommandError, CommandHandler, CommandInput, Evaluator, Registry,
-    Value, ValueType,
-};
-
 struct GreetHandler;
 
 #[async_trait]
@@ -48,10 +43,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Value::Str(greeting) = result else {
         panic!("Expected greeting to be a string");
     };
+
     println!("{greeting}");
     Ok(())
 }
 ```
+
+You can find more usage examples in [examples](examples).
 
 ## License
 

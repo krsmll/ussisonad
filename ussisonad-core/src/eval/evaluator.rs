@@ -1,8 +1,8 @@
 use crate::ParserError;
-use crate::ussisonad::lex;
-use crate::ussisonad::model::{CommandInput, EvalError, Registry, Value};
-use crate::ussisonad::parse::ast;
-use crate::ussisonad::parse::parser::Parser;
+use crate::eval::model::{ArgSchema, CommandInput, EvalError, Registry, Value};
+use crate::lex;
+use crate::parse::ast;
+use crate::parse::parser::Parser;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ impl Evaluator {
         let tokenizer = lex::make_tokenizer(src_input);
         let ast = Parser::parse(tokenizer).map_err(|err| match err {
             ParserError::LexerStage(lex_errs) => EvalError::LexerStage(lex_errs),
-            parse_errs => EvalError::ParsingStage(parse_errs),
+            parser_err => EvalError::ParsingStage(parser_err),
         })?;
 
         self.evaluate_ast(&ast).await
@@ -56,6 +56,7 @@ impl Evaluator {
 
     fn eval_builtin(&self, cmd: &ast::BuiltinCommand, input: Value) -> Result<Value, EvalError> {
         match cmd {
+            ast::BuiltinCommand::With(expr) => self.eval_with(input, expr),
             ast::BuiltinCommand::Filter(expr) => self.eval_filter(input, expr),
             ast::BuiltinCommand::Unique(field) => self.eval_unique(input, field.as_ref()),
             ast::BuiltinCommand::Map(expr) => self.eval_map(input, expr),
@@ -101,6 +102,18 @@ impl Evaluator {
             }
         }
         Ok(Value::Vector(result))
+    }
+
+    fn eval_with(&self, input: Value, expr: &ast::Expr) -> Result<Value, EvalError> {
+        if input != Value::None {
+            return Err(EvalError::TypeMismatch {
+                expected: "None",
+                got: input.type_name(),
+            });
+        }
+
+        let expr = self.eval_expr(expr, &input)?;
+        Ok(expr)
     }
 
     fn eval_filter(&self, input: Value, expr: &ast::Expr) -> Result<Value, EvalError> {
@@ -176,55 +189,92 @@ impl Evaluator {
             });
         }
 
-        let arg = match &cmd.arg {
-            None => Value::None,
-            Some(arg) => self.eval_expr(arg, &input)?,
-        };
-
-        if let Some(arg_schema) = &def.arg
-            && arg_schema.required
-            && !arg_schema.accepts.is_empty()
-            && !arg_schema.accepts.iter().any(|t| t.matches(&arg))
-        {
-            return Err(EvalError::UnexpectedArgumentType {
-                command: cmd.name.clone(),
-                expected: arg_schema.accepts.clone(),
-                got: arg.type_name(),
-            });
-        }
-
         let options = cmd
             .options
             .iter()
             .map(|(k, expr)| Ok((k.clone(), self.eval_expr(expr, &input)?)))
             .collect::<Result<HashMap<_, _>, EvalError>>()?;
 
-        let command_input = CommandInput {
-            arg,
-            flags: cmd.flags.clone(),
-            options,
-        };
+        if cmd.arg.as_ref() == Some(&ast::Expr::Each) {
+            let items = input.clone().into_vector()?;
+            let mut acc = Vec::new();
+            for arg in items {
+                Self::validate_arg(&cmd.name, def.arg.as_ref(), &arg)?;
 
-        let result = def
-            .handler
-            .execute(input, command_input)
-            .await
-            .map_err(EvalError::Handler)?;
+                let command_input = CommandInput {
+                    arg,
+                    flags: cmd.flags.clone(),
+                    options: options.clone(),
+                };
 
-        if !def.returns.matches(&result) {
-            return Err(EvalError::UnexpectedReturnType {
-                command: cmd.name.clone(),
-                expected: def.returns.clone(),
-                got: result.type_name(),
-            });
+                acc.push(
+                    def.handler
+                        .execute(input.clone(), command_input)
+                        .await
+                        .map_err(EvalError::Handler)?,
+                );
+            }
+
+            Ok(Value::Vector(acc))
+        } else {
+            let arg = match &cmd.arg {
+                None => Value::None,
+                Some(expr) => self.eval_expr(expr, &input)?,
+            };
+
+            Self::validate_arg(&cmd.name, def.arg.as_ref(), &arg)?;
+
+            let command_input = CommandInput {
+                arg,
+                flags: cmd.flags.clone(),
+                options,
+            };
+
+            let res = def
+                .handler
+                .execute(input, command_input)
+                .await
+                .map_err(EvalError::Handler)?;
+
+            if !def.returns.matches(&res) {
+                return Err(EvalError::UnexpectedReturnType {
+                    command: cmd.name.clone(),
+                    expected: def.returns.clone(),
+                    got: res.type_name(),
+                });
+            }
+
+            Ok(res)
         }
+    }
 
-        Ok(result)
+    fn validate_arg(
+        cmd_name: &str,
+        arg_schema: Option<&ArgSchema>,
+        arg: &Value,
+    ) -> Result<(), EvalError> {
+        if let Some(schema) = arg_schema
+            && schema.required
+            && !schema.accepts.is_empty()
+            && !schema.accepts(arg)
+        {
+            Err(EvalError::UnexpectedArgumentType {
+                command: cmd_name.to_string(),
+                expected: schema.accepts.clone(),
+                got: arg.type_name(),
+            })
+        } else {
+            Ok(())
+        }
     }
 
     fn eval_expr(&self, expr: &ast::Expr, context: &Value) -> Result<Value, EvalError> {
         match expr {
             ast::Expr::It => Ok(context.clone()),
+            ast::Expr::Each => Err(EvalError::TypeMismatch {
+                expected: "expression",
+                got: "each",
+            }),
             ast::Expr::Bool(b) => Ok(Value::Bool(*b)),
             ast::Expr::Int(n) => Ok(Value::Int(*n)),
             ast::Expr::Float(f) => Ok(Value::Float(*f)),
@@ -420,8 +470,8 @@ impl Evaluator {
 
 #[cfg(test)]
 mod tests {
-    use crate::ussisonad::evaluator::Evaluator;
-    use crate::ussisonad::model::{
+    use crate::eval::evaluator::Evaluator;
+    use crate::eval::model::{
         ArgSchema, CommandDefinition, CommandError, CommandHandler, CommandInput, ConfigError,
         EvalError, FieldSchema, ObjectSchema, Registry, Value, ValueType,
     };
@@ -964,48 +1014,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_map_it() {
-        assert_expr!(
-            ";range 3 >> map it",
-            Value::Vector(vec![
-                Value::Int(0),
-                Value::Int(1),
-                Value::Int(2),
-                Value::Int(3)
-            ])
-        );
-    }
-
-    #[tokio::test]
-    async fn test_map_arithmetic() {
-        assert_expr!(
-            ";range 3 >> map it * 2",
-            Value::Vector(vec![
-                Value::Int(0),
-                Value::Int(2),
-                Value::Int(4),
-                Value::Int(6)
-            ])
-        );
-    }
-
-    #[tokio::test]
-    async fn test_map_field() {
-        assert_expr!(
-            ";items >> map .value",
-            Value::Vector(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
-        );
-    }
-
-    #[tokio::test]
-    async fn test_map_chained_with_filter() {
-        assert_expr!(
-            ";range 5 >> filter it > 2 >> map it * 3",
-            Value::Vector(vec![Value::Int(9), Value::Int(12), Value::Int(15)])
-        );
-    }
-
-    #[tokio::test]
     async fn test_unknown_command_error() {
         assert_expr_err!(";unknown_cmd", EvalError::UnknownCommand(_));
     }
@@ -1047,21 +1055,6 @@ mod tests {
         assert_expr!(
             ";range 5 >> filter it / 2 > 1",
             Value::Vector(vec![Value::Int(4), Value::Int(5)])
-        );
-    }
-
-    #[tokio::test]
-    async fn test_map_divdiv_floor_division() {
-        assert_expr!(
-            ";range 5 >> map it // 2",
-            Value::Vector(vec![
-                Value::Int(0),
-                Value::Int(0),
-                Value::Int(1),
-                Value::Int(1),
-                Value::Int(2),
-                Value::Int(2),
-            ])
         );
     }
 

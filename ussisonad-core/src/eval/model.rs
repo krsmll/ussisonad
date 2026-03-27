@@ -17,6 +17,12 @@ pub enum CommandError {
     },
 }
 
+impl CommandError {
+    pub fn new_external<E: Error + Send + Sync + 'static>(error: E) -> Self {
+        CommandError::External(Box::new(error))
+    }
+}
+
 impl fmt::Display for CommandError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

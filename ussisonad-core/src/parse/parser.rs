@@ -1,10 +1,10 @@
-use crate::ussisonad::lex::LexError;
-use crate::ussisonad::lex::Token;
-use crate::ussisonad::lex::{LexResult, Spanned};
-use crate::ussisonad::parse::ast::{
+use crate::lex::LexError;
+use crate::lex::Token;
+use crate::lex::{LexResult, Spanned};
+use crate::parse::ast::{
     BinOp, BuiltinCommand, Command, CustomCommand, Expr, PipelineNode, SortDirection,
 };
-use crate::ussisonad::parse::error::ParserError;
+use crate::parse::error::ParserError;
 use std::collections::{HashMap, HashSet};
 use std::iter::Peekable;
 use std::mem;
@@ -94,7 +94,6 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
             Token::Filter => self.parse_filter(),
             Token::Sort => self.parse_sort(),
             Token::Take => self.parse_take(),
-            Token::Map => self.parse_map(),
             Token::Unique => self.parse_unique(),
             Token::Count => {
                 self.next();
@@ -103,15 +102,6 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
             Token::Str(_) => self.parse_custom_command(),
             _ => Err(ParserError::UnexpectedToken(self.next().unwrap())),
         }
-    }
-
-    fn parse_unique(&mut self) -> Result<Command, ParserError> {
-        self.next();
-        let field = match self.peek() {
-            Some(Token::Dot) => Some(self.parse_expr(0)?),
-            _ => None,
-        };
-        Ok(Command::Builtin(BuiltinCommand::Unique(field)))
     }
 
     fn parse_custom_command(&mut self) -> Result<Command, ParserError> {
@@ -156,16 +146,19 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         Ok(Command::Custom(command))
     }
 
+    fn parse_unique(&mut self) -> Result<Command, ParserError> {
+        self.next();
+        let field = match self.peek() {
+            Some(Token::Dot) => Some(self.parse_expr(0)?),
+            _ => None,
+        };
+        Ok(Command::Builtin(BuiltinCommand::Unique(field)))
+    }
+
     fn parse_filter(&mut self) -> Result<Command, ParserError> {
         self.next();
         let expr = self.parse_expr(0)?;
         Ok(Command::Builtin(BuiltinCommand::Filter(expr)))
-    }
-
-    fn parse_map(&mut self) -> Result<Command, ParserError> {
-        self.next();
-        let expr = self.parse_expr(0)?;
-        Ok(Command::Builtin(BuiltinCommand::Map(expr)))
     }
 
     fn parse_sort(&mut self) -> Result<Command, ParserError> {
@@ -208,9 +201,9 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         let (tok, start, end) = self.next().ok_or(ParserError::UnexpectedEOF)?;
 
         let mut lhs = match tok {
+            Token::It => Expr::It,
             Token::Str(s) => Expr::Str(s),
             Token::Bool(b) => Expr::Bool(b),
-            Token::It => Expr::It,
             Token::Int(s) => Self::parse_int_expr((Token::Int(s), start, end))?,
             Token::Float(s) => Self::parse_float_expr((Token::Float(s), start, end))?,
             Token::Dot => self.parse_field_path()?,
@@ -372,12 +365,12 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::ussisonad::lex::make_tokenizer;
-    use crate::ussisonad::parse::ast::{
+    use crate::lex::make_tokenizer;
+    use crate::parse::ast::{
         BinOp, BuiltinCommand, Command, CustomCommand, Expr, PipelineNode, SortDirection,
     };
-    use crate::ussisonad::parse::error::ParserError;
-    use crate::ussisonad::parse::parser::Parser;
+    use crate::parse::error::ParserError;
+    use crate::parse::parser::Parser;
     use std::collections::{HashMap, HashSet};
 
     macro_rules! assert_ast {
@@ -545,6 +538,18 @@ mod tests {
             ";filter .bpm above 200",
             cmd(Command::Builtin(BuiltinCommand::Filter(binary(
                 field(&["bpm"]),
+                BinOp::Gt,
+                Expr::Int(200),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_atleast_keyword() {
+        assert_ast!(
+            ";filter .bpm atleast 200",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["bpm"]),
                 BinOp::Ge,
                 Expr::Int(200),
             ))))
@@ -555,6 +560,18 @@ mod tests {
     fn test_filter_below_keyword() {
         assert_ast!(
             ";filter .bpm below 300",
+            cmd(Command::Builtin(BuiltinCommand::Filter(binary(
+                field(&["bpm"]),
+                BinOp::Lt,
+                Expr::Int(300),
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_filter_atmost_keyword() {
+        assert_ast!(
+            ";filter .bpm atmost 300",
             cmd(Command::Builtin(BuiltinCommand::Filter(binary(
                 field(&["bpm"]),
                 BinOp::Le,
@@ -958,45 +975,6 @@ mod tests {
     }
 
     #[test]
-    fn test_map_field() {
-        assert_ast!(
-            ";top >> map .title",
-            PipelineNode::Pipe {
-                lhs: Box::new(cmd(custom("top"))),
-                rhs: Box::new(cmd(Command::Builtin(BuiltinCommand::Map(field(&[
-                    "title"
-                ]))))),
-            }
-        );
-    }
-
-    #[test]
-    fn test_map_it() {
-        assert_ast!(
-            ";top >> map it",
-            PipelineNode::Pipe {
-                lhs: Box::new(cmd(custom("top"))),
-                rhs: Box::new(cmd(Command::Builtin(BuiltinCommand::Map(Expr::It)))),
-            }
-        );
-    }
-
-    #[test]
-    fn test_map_arithmetic() {
-        assert_ast!(
-            ";top >> map it * 2",
-            PipelineNode::Pipe {
-                lhs: Box::new(cmd(custom("top"))),
-                rhs: Box::new(cmd(Command::Builtin(BuiltinCommand::Map(binary(
-                    Expr::It,
-                    BinOp::Mul,
-                    Expr::Int(2),
-                ))))),
-            }
-        );
-    }
-
-    #[test]
     fn test_filter_complex_predicate() {
         assert_ast!(
             ";top >> filter (.bpm >= 230 and HD in .mods) or .bpm >= 250",
@@ -1036,21 +1014,6 @@ mod tests {
                 BinOp::Gt,
                 Expr::Int(1),
             ))))
-        );
-    }
-
-    #[test]
-    fn test_map_sub() {
-        assert_ast!(
-            ";top >> map it - 1",
-            PipelineNode::Pipe {
-                lhs: Box::new(cmd(custom("top"))),
-                rhs: Box::new(cmd(Command::Builtin(BuiltinCommand::Map(binary(
-                    Expr::It,
-                    BinOp::Sub,
-                    Expr::Int(1),
-                ))))),
-            }
         );
     }
 

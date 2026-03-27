@@ -1,5 +1,5 @@
-use crate::ussisonad::lex::error::{LexError, LexErrorType};
-use crate::ussisonad::lex::token::Token;
+use crate::lex::error::{LexError, LexErrorType};
+use crate::lex::token::Token;
 use std::collections::VecDeque;
 
 pub type Spanned = (Token, usize, usize);
@@ -380,9 +380,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::ussisonad::lex::error::{LexError, LexErrorType};
-    use crate::ussisonad::lex::lexer::make_tokenizer;
-    use crate::ussisonad::lex::token::Token;
+    use crate::lex::error::{LexError, LexErrorType};
+    use crate::lex::lexer::make_tokenizer;
+    use crate::lex::token::Token;
 
     macro_rules! assert_tokens {
    ($src:expr, $($expected:expr),* $(,)?) => {
@@ -732,19 +732,6 @@ mod tests {
     }
 
     #[test]
-    fn test_keyword_map() {
-        assert_tokens!(
-            ";top >> map .title",
-            Token::Semicolon,
-            Token::Str("top".to_string()),
-            Token::GtGt,
-            Token::Map,
-            Token::Dot,
-            Token::Str("title".to_string()),
-        );
-    }
-
-    #[test]
     fn test_keyword_it() {
         assert_tokens!(
             ";top >> filter it > 0",
@@ -874,6 +861,21 @@ mod tests {
             Token::Filter,
             Token::Dot,
             Token::Str("bpm".to_string()),
+            Token::Gt,
+            Token::Int("200".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_keyword_atleast_alias() {
+        assert_tokens!(
+            ";top >> filter .bpm atleast 200",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::Dot,
+            Token::Str("bpm".to_string()),
             Token::Ge,
             Token::Int("200".to_string()),
         );
@@ -883,6 +885,21 @@ mod tests {
     fn test_keyword_below_alias() {
         assert_tokens!(
             ";top >> filter .bpm below 300",
+            Token::Semicolon,
+            Token::Str("top".to_string()),
+            Token::GtGt,
+            Token::Filter,
+            Token::Dot,
+            Token::Str("bpm".to_string()),
+            Token::Lt,
+            Token::Int("300".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_keyword_atmost_alias() {
+        assert_tokens!(
+            ";top >> filter .bpm atmost 300",
             Token::Semicolon,
             Token::Str("top".to_string()),
             Token::GtGt,
@@ -1080,33 +1097,6 @@ mod tests {
             ";top @ # value",
             LexErrorType::UnrecognizedToken('@'),
             LexErrorType::UnrecognizedToken('#'),
-        );
-    }
-
-    #[test]
-    fn test_logic_with_subcommand() {
-        assert_tokens!(
-            ";top >> filter .title in { top blourgh >> map .title } or .acc > 98.5",
-            Token::Semicolon,
-            Token::Str("top".to_string()),
-            Token::GtGt,
-            Token::Filter,
-            Token::Dot,
-            Token::Str("title".to_string()),
-            Token::In,
-            Token::LeftBrace,
-            Token::Str("top".to_string()),
-            Token::Str("blourgh".to_string()),
-            Token::GtGt,
-            Token::Map,
-            Token::Dot,
-            Token::Str("title".to_string()),
-            Token::RightBrace,
-            Token::Or,
-            Token::Dot,
-            Token::Str("acc".to_string()),
-            Token::Gt,
-            Token::Float("98.5".to_string()),
         );
     }
 }

@@ -1,4 +1,4 @@
-use crate::ussisonad::lex::{LexError, Spanned, Token};
+use crate::lex::{LexError, Spanned, Token};
 use std::fmt;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
