@@ -4,46 +4,53 @@ pub use self::token::Token;
 
 use std::collections::VecDeque;
 
-pub type Span = (usize, usize);
-pub type Spanned = (Token, usize, usize);
-pub type LexResult = Result<Spanned, LexError>;
-
 #[derive(Debug, Clone, PartialEq)]
-pub struct LexError {
-    pub kind: LexErrorKind,
-    pub location: Span,
+pub enum Loc {
+    Point(usize),
+    Slice(usize, usize),
 }
 
+impl std::fmt::Display for Loc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Loc::Point(p) => write!(f, "{}", p),
+            Loc::Slice(s, p) => write!(f, "{}:{}", s, p),
+        }
+    }
+}
+
+pub type Spanned = (Token, usize, usize);
+pub type LexResult = Result<Spanned, LexError>;
 #[derive(Debug, Clone, PartialEq)]
-pub enum LexErrorKind {
-    UnrecognizedToken(char),
-    UnexpectedEof,
-    UnfinishedDotAccess,
-    BadStringEscape,
-    UnexpectedStringEnd,
-    MalformedNumber(String),
+pub enum LexError {
+    UnrecognizedToken(Loc, char),
+    UnexpectedEof(Loc),
+    UnfinishedDotAccess(Loc),
+    BadStringEscape(Loc),
+    UnexpectedStringEnd(Loc),
+    MalformedNumber(Loc, String),
 }
 
 impl std::fmt::Display for LexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.kind {
-            LexErrorKind::UnrecognizedToken(c) => {
-                write!(f, "unrecognized token '{c}' at {:?}", self.location)
+        match self {
+            LexError::UnrecognizedToken(span, c) => {
+                write!(f, "unrecognized token '{c}' at {:?}", span)
             }
-            LexErrorKind::UnexpectedEof => {
-                write!(f, "unexpected end of input at {:?}", self.location)
+            LexError::UnexpectedEof(span) => {
+                write!(f, "unexpected end of input at {:?}", span)
             }
-            LexErrorKind::UnfinishedDotAccess => {
-                write!(f, "expected field name after '.' at {:?}", self.location)
+            LexError::UnfinishedDotAccess(span) => {
+                write!(f, "expected field name after '.' at {:?}", span)
             }
-            LexErrorKind::BadStringEscape => {
-                write!(f, "invalid escape sequence at {:?}", self.location)
+            LexError::BadStringEscape(span) => {
+                write!(f, "invalid escape sequence at {:?}", span)
             }
-            LexErrorKind::UnexpectedStringEnd => {
-                write!(f, "unterminated string literal at {:?}", self.location)
+            LexError::UnexpectedStringEnd(span) => {
+                write!(f, "unterminated string literal at {:?}", span)
             }
-            LexErrorKind::MalformedNumber(s) => {
-                write!(f, "malformed number '{s}' at {:?}", self.location)
+            LexError::MalformedNumber(span, s) => {
+                write!(f, "malformed number '{s}' at {:?}", span)
             }
         }
     }
@@ -51,7 +58,7 @@ impl std::fmt::Display for LexError {
 
 impl std::error::Error for LexError {}
 
-/// Lexer is generic over any iterator of (byte_offset, char) pairs.
+/// Lexer is generic over any iterator of (usize, char) pairs.
 #[derive(Debug)]
 pub struct Lexer<T: Iterator<Item = (usize, char)>> {
     chars: T,
@@ -83,6 +90,7 @@ impl<T: Iterator<Item = (usize, char)>> Lexer<T> {
 
 impl<'a> Lexer<std::str::CharIndices<'a>> {
     /// Convenience constructor for &str input.
+    #[must_use]
     pub fn new_from_str(input: &'a str) -> Self {
         Self::new(input.char_indices())
     }
@@ -126,6 +134,7 @@ impl<T: Iterator<Item = (usize, char)>> Lexer<T> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn consume_char(&mut self, c: char) -> Result<(), LexError> {
         match c {
             ' ' | '\t' | '\r' | '\n' => {
@@ -156,10 +165,7 @@ impl<T: Iterator<Item = (usize, char)>> Lexer<T> {
                     }
                     _ => {
                         self.advance();
-                        return Err(LexError {
-                            kind: LexErrorKind::UnfinishedDotAccess,
-                            location: (pos, pos),
-                        });
+                        return Err(LexError::UnfinishedDotAccess(Loc::Point(pos)));
                     }
                 }
             }
@@ -231,10 +237,7 @@ impl<T: Iterator<Item = (usize, char)>> Lexer<T> {
             c => {
                 let pos = self.pos();
                 self.advance();
-                return Err(LexError {
-                    kind: LexErrorKind::UnrecognizedToken(c),
-                    location: (pos, pos),
-                });
+                return Err(LexError::UnrecognizedToken(Loc::Point(pos), c));
             }
         }
         Ok(())
@@ -290,6 +293,8 @@ impl<T: Iterator<Item = (usize, char)>> Lexer<T> {
                             self.advance();
                         }
                         _ => {
+                            let err = LexError::BadStringEscape(Loc::Slice(slash_pos, self.pos()));
+
                             // Skip to the closing quote or EOF before returning
                             // the error so the lexer can continue afterwards.
                             loop {
@@ -304,10 +309,8 @@ impl<T: Iterator<Item = (usize, char)>> Lexer<T> {
                                     }
                                 }
                             }
-                            return Err(LexError {
-                                kind: LexErrorKind::BadStringEscape,
-                                location: (slash_pos, self.pos()),
-                            });
+
+                            return Err(err);
                         }
                     }
                 }
@@ -316,10 +319,7 @@ impl<T: Iterator<Item = (usize, char)>> Lexer<T> {
                     self.advance();
                 }
                 None => {
-                    return Err(LexError {
-                        kind: LexErrorKind::UnexpectedStringEnd,
-                        location: (start, self.pos()),
-                    });
+                    return Err(LexError::UnexpectedStringEnd(Loc::Slice(start, self.pos())));
                 }
             }
         }
@@ -366,10 +366,10 @@ impl<T: Iterator<Item = (usize, char)>> Lexer<T> {
                             break;
                         }
                     }
-                    return Err(LexError {
-                        kind: LexErrorKind::MalformedNumber(content),
-                        location: (start, self.pos()),
-                    });
+                    return Err(LexError::MalformedNumber(
+                        Loc::Slice(start, self.pos()),
+                        content,
+                    ));
                 }
                 _ => break,
             }
@@ -420,11 +420,10 @@ mod tests {
             .expect("lexer should not fail")
     }
 
-    fn lex_err(input: &str) -> LexErrorKind {
+    fn lex_err(input: &str) -> LexError {
         Lexer::new_from_str(input)
             .collect::<Result<Vec<_>, _>>()
             .expect_err("lexer should fail")
-            .kind
     }
 
     #[test]
@@ -482,30 +481,30 @@ mod tests {
 
     #[test]
     fn malformed_number_errors() {
-        assert!(matches!(
-            lex_err("123abc"),
-            LexErrorKind::MalformedNumber(_)
-        ));
+        assert!(matches!(lex_err("123abc"), LexError::MalformedNumber(..)));
     }
 
     #[test]
     fn unterminated_string_errors() {
         assert!(matches!(
             lex_err(r#""unterminated"#),
-            LexErrorKind::UnexpectedStringEnd
+            LexError::UnexpectedStringEnd(Loc::Slice(1, 13)),
         ));
     }
 
     #[test]
     fn bad_string_escape_errors() {
-        assert!(matches!(lex_err(r#""\q""#), LexErrorKind::BadStringEscape));
+        assert!(matches!(
+            lex_err(r#""\q""#),
+            LexError::BadStringEscape(Loc::Slice(1, 2))
+        ));
     }
 
     #[test]
     fn unfinished_dot_access_errors() {
         assert!(matches!(
             lex_err(". something"),
-            LexErrorKind::UnfinishedDotAccess
+            LexError::UnfinishedDotAccess(Loc::Point(0))
         ));
     }
 
@@ -513,7 +512,7 @@ mod tests {
     fn unrecognized_token_errors() {
         assert!(matches!(
             lex_err("@bad"),
-            LexErrorKind::UnrecognizedToken('@')
+            LexError::UnrecognizedToken(Loc::Point(0), '@')
         ));
     }
 }

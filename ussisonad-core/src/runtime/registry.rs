@@ -173,6 +173,9 @@ impl RegistryBuilder {
         self
     }
 
+    /// # Errors
+    ///
+    /// Returns `ConfigError` if any registered command fails to build or has a duplicate name.
     pub fn build(self) -> Result<Registry, ConfigError> {
         let mut commands: HashMap<String, Arc<CommandDefinition>> = HashMap::new();
         let mut schemas: HashMap<String, Arc<ObjectSchema>> = HashMap::new();
@@ -334,6 +337,9 @@ impl CommandDefinitionBuilder {
         self
     }
 
+    /// # Errors
+    ///
+    /// Returns `ConfigError` if required fields are missing, empty, or otherwise invalid.
     pub fn build(self) -> Result<CommandDefinition, ConfigError> {
         let name = require_string(
             self.name,
@@ -385,6 +391,7 @@ impl ArgSchema {
         ArgSchemaBuilder::default()
     }
 
+    #[must_use]
     pub fn accepts(&self, value: &Value) -> bool {
         self.accepts.iter().any(|accept| accept.matches(value))
     }

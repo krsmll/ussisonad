@@ -89,7 +89,7 @@ impl fmt::Display for EvalError {
             EvalError::NotComparable(a, b) => {
                 write!(f, "values of type `{a}` and `{b}` are not comparable")
             }
-            EvalError::LexerStage(reason) => write!(f, "error occurred during lexing: {}", reason),
+            EvalError::LexerStage(reason) => write!(f, "error occurred during lexing: {reason}"),
             EvalError::ParserStage(reason) => write!(f, "errors occurred during parsing: {reason}"),
             EvalError::Handler(e) => write!(f, "command handler error: {e}"),
         }
@@ -115,6 +115,9 @@ impl Evaluator {
         Self { registry }
     }
 
+    /// # Errors
+    ///
+    /// Returns `EvalError` if lexing, parsing, or evaluation fails.
     pub async fn execute(&self, src_input: &str) -> Result<Value, EvalError> {
         let tokenizer = Lexer::new_from_str(src_input);
 
@@ -125,6 +128,9 @@ impl Evaluator {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns `EvalError` if evaluation of the AST fails.
     pub async fn evaluate_ast(&self, node: &ast::PipelineNode) -> Result<Value, EvalError> {
         self.eval_node(node, Value::None).await
     }
@@ -148,28 +154,33 @@ impl Evaluator {
 
     async fn eval_command(&self, cmd: &ast::Command, input: Value) -> Result<Value, EvalError> {
         match cmd {
-            ast::Command::Builtin(builtin) => self.eval_builtin(builtin, input),
+            ast::Command::Builtin(builtin) => Self::eval_builtin(builtin, input),
             ast::Command::Custom(custom) => self.eval_custom(custom, input).await,
         }
     }
 
-    fn eval_builtin(&self, cmd: &ast::BuiltinCommand, input: Value) -> Result<Value, EvalError> {
+    fn eval_builtin(cmd: &ast::BuiltinCommand, input: Value) -> Result<Value, EvalError> {
         match cmd {
-            ast::BuiltinCommand::Filter(expr) => self.eval_filter(input, expr),
-            ast::BuiltinCommand::Unique(field) => self.eval_unique(input, field.as_ref()),
+            ast::BuiltinCommand::Filter(expr) => Self::eval_filter(input, expr),
+            ast::BuiltinCommand::Unique(field) => Self::eval_unique(input, field.as_ref()),
 
             ast::BuiltinCommand::Sort { field, direction } => {
-                self.eval_sort(input, field, *direction)
+                Self::eval_sort(input, field, *direction)
             }
 
             ast::BuiltinCommand::Limit(n) => {
                 let items = Self::expect_vector(input)?;
-                Ok(Value::Vector(items.into_iter().take(*n as usize).collect()))
+                Ok(Value::Vector(
+                    items
+                        .into_iter()
+                        .take(usize::try_from(*n).unwrap_or(usize::MAX))
+                        .collect(),
+                ))
             }
 
             ast::BuiltinCommand::Count => {
                 let items = Self::expect_vector(input)?;
-                Ok(Value::Int(items.len() as i64))
+                Ok(Value::Int(i64::try_from(items.len()).unwrap_or(i64::MAX)))
             }
         }
     }
@@ -184,13 +195,13 @@ impl Evaluator {
         }
     }
 
-    fn eval_unique(&self, input: Value, field: Option<&ast::Expr>) -> Result<Value, EvalError> {
+    fn eval_unique(input: Value, field: Option<&ast::Expr>) -> Result<Value, EvalError> {
         let items = Self::expect_vector(input)?;
         let mut seen: Vec<Value> = Vec::new();
         let mut result = Vec::new();
         for item in items {
             let key = match field {
-                Some(expr) => self.eval_expr(expr, &item)?,
+                Some(expr) => Self::eval_expr(expr, &item)?,
                 None => item.clone(),
             };
 
@@ -202,11 +213,11 @@ impl Evaluator {
         Ok(Value::Vector(result))
     }
 
-    fn eval_filter(&self, input: Value, expr: &ast::Expr) -> Result<Value, EvalError> {
+    fn eval_filter(input: Value, expr: &ast::Expr) -> Result<Value, EvalError> {
         let items = Self::expect_vector(input)?;
         let filtered = items
             .into_iter()
-            .filter_map(|item| match self.eval_expr(expr, &item) {
+            .filter_map(|item| match Self::eval_expr(expr, &item) {
                 Ok(Value::Bool(true)) => Some(Ok(item)),
                 Ok(Value::Bool(false) | Value::None) => None,
                 Ok(other) => Some(Err(EvalError::TypeMismatch {
@@ -220,7 +231,6 @@ impl Evaluator {
     }
 
     fn eval_sort(
-        &self,
         input: Value,
         field: &ast::Expr,
         direction: ast::SortDirection,
@@ -228,7 +238,7 @@ impl Evaluator {
         let items = Self::expect_vector(input)?;
         let mut keyed: Vec<(Value, Value)> = items
             .into_iter()
-            .map(|item| Ok((self.eval_expr(field, &item)?, item)))
+            .map(|item| Ok((Self::eval_expr(field, &item)?, item)))
             .collect::<Result<_, _>>()?;
 
         let mut lazy_error = None;
@@ -278,12 +288,12 @@ impl Evaluator {
         let options = cmd
             .options
             .iter()
-            .map(|(k, expr)| Ok((k.clone(), self.eval_expr(expr, &input)?)))
+            .map(|(k, expr)| Ok((k.clone(), Self::eval_expr(expr, &input)?)))
             .collect::<Result<HashMap<_, _>, EvalError>>()?;
 
         let arg = match &cmd.arg {
             None => Value::None,
-            Some(expr) => self.eval_expr(expr, &input)?,
+            Some(expr) => Self::eval_expr(expr, &input)?,
         };
 
         Self::validate_arg(&cmd.name, def.arg.as_ref(), &arg)?;
@@ -331,7 +341,7 @@ impl Evaluator {
         }
     }
 
-    fn eval_expr(&self, expr: &ast::Expr, context: &Value) -> Result<Value, EvalError> {
+    fn eval_expr(expr: &ast::Expr, context: &Value) -> Result<Value, EvalError> {
         match expr {
             ast::Expr::It => Ok(context.clone()),
             ast::Expr::Bool(b) => Ok(Value::Bool(*b)),
@@ -342,7 +352,7 @@ impl Evaluator {
             ast::Expr::Vector(items) => {
                 let vals = items
                     .iter()
-                    .map(|e| self.eval_expr(e, context))
+                    .map(|e| Self::eval_expr(e, context))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Value::Vector(vals))
             }
@@ -362,7 +372,7 @@ impl Evaluator {
                     })
             }
 
-            ast::Expr::Not(inner) => match self.eval_expr(inner, context)? {
+            ast::Expr::Not(inner) => match Self::eval_expr(inner, context)? {
                 Value::Bool(b) => Ok(Value::Bool(!b)),
                 other => Err(EvalError::TypeMismatch {
                     expected: "boolean",
@@ -373,9 +383,9 @@ impl Evaluator {
             ast::Expr::Binary { lhs, op, rhs, .. } => {
                 match op {
                     ast::BinOp::And => {
-                        let l = self.eval_expr(lhs, context)?;
+                        let l = Self::eval_expr(lhs, context)?;
                         return match l {
-                            Value::Bool(true) => self.eval_expr(rhs, context),
+                            Value::Bool(true) => Self::eval_expr(rhs, context),
                             Value::Bool(false) => Ok(Value::Bool(false)),
                             _ => Err(EvalError::TypeMismatch {
                                 expected: "boolean",
@@ -385,10 +395,10 @@ impl Evaluator {
                     }
 
                     ast::BinOp::Or => {
-                        let l = self.eval_expr(lhs, context)?;
+                        let l = Self::eval_expr(lhs, context)?;
                         return match l {
                             Value::Bool(true) => Ok(Value::Bool(true)),
-                            Value::Bool(false) => self.eval_expr(rhs, context),
+                            Value::Bool(false) => Self::eval_expr(rhs, context),
                             _ => Err(EvalError::TypeMismatch {
                                 expected: "boolean",
                                 got: l.type_name(),
@@ -399,22 +409,24 @@ impl Evaluator {
                     _ => {}
                 }
 
-                let l = self.eval_expr(lhs, context)?;
-                let r = self.eval_expr(rhs, context)?;
+                let l = Self::eval_expr(lhs, context)?;
+                let r = Self::eval_expr(rhs, context)?;
 
-                Self::eval_binary(op, l, r)
+                Self::eval_binary(*op, l, r)
             }
         }
     }
 
-    fn eval_binary(op: &ast::BinOp, lhs: Value, rhs: Value) -> Result<Value, EvalError> {
+    fn eval_binary(op: ast::BinOp, lhs: Value, rhs: Value) -> Result<Value, EvalError> {
         match op {
             ast::BinOp::Add => Self::numeric_op(lhs, rhs, |a, b| a + b, |a, b| a + b),
             ast::BinOp::Sub => Self::numeric_op(lhs, rhs, |a, b| a - b, |a, b| a - b),
             ast::BinOp::Mul => Self::numeric_op(lhs, rhs, |a, b| a * b, |a, b| a * b),
             ast::BinOp::Div => Self::numeric_op(lhs, rhs, |a, b| a / b, |a, b| a / b),
             ast::BinOp::Mod => Self::numeric_op(lhs, rhs, |a, b| a % b, |a, b| a % b),
-            ast::BinOp::DivDiv => {
+            ast::BinOp::DivDiv =>
+            {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
                 Self::numeric_op(lhs, rhs, |a, b| a / b, |a, b| (a as i64 / b as i64) as f64)
             }
 
@@ -463,6 +475,7 @@ impl Evaluator {
         }
     }
 
+    #[allow(clippy::cast_precision_loss)]
     fn numeric_op(
         lhs: Value,
         rhs: Value,
@@ -481,6 +494,7 @@ impl Evaluator {
         }
     }
 
+    #[allow(clippy::cast_precision_loss)]
     fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalError> {
         match (a, b) {
             (Value::Int(a), Value::Int(b)) => Ok(a.cmp(b)),

@@ -104,8 +104,11 @@ impl ObjectSchemaBuilder {
         self
     }
 
+    /// # Errors
+    ///
+    /// Returns `ConfigError` if required fields are missing, empty, or the field list is empty.
     pub fn build(self) -> Result<ObjectSchema, super::registry::ConfigError> {
-        use super::registry::{ConfigError, require_string};
+        use super::registry::{require_string, ConfigError};
 
         if self.fields.is_empty() {
             return Err(ConfigError::EmptyObjectSchemaFields);
@@ -168,7 +171,7 @@ impl FieldSchemaBuilder {
     }
 
     pub(super) fn build(self) -> Result<FieldSchema, super::registry::ConfigError> {
-        use super::registry::{ConfigError, require_string};
+        use super::registry::{require_string, ConfigError};
 
         let name = require_string(
             self.name,

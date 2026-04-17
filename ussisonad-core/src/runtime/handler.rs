@@ -1,4 +1,4 @@
-use crate::runtime::value::Value;
+use crate::runtime::value::{Value, ValueType};
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -11,7 +11,7 @@ pub enum CommandError {
     InvalidArgument(String),
     FlagConflict(Vec<&'static str>),
     TypeMismatch {
-        expected: Vec<crate::runtime::value::ValueType>,
+        expected: Vec<ValueType>,
         got: &'static str,
     },
 }
@@ -40,7 +40,7 @@ impl fmt::Display for CommandError {
             CommandError::TypeMismatch { expected, got } => {
                 let expected = expected
                     .iter()
-                    .map(|e| e.to_string())
+                    .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ");
                 write!(f, "type mismatch: expected {expected}, got {got}")
@@ -66,10 +66,12 @@ pub struct CommandInput {
 }
 
 impl CommandInput {
+    #[must_use]
     pub fn has_flag(&self, flag: &str) -> bool {
         self.flags.contains(flag)
     }
 
+    #[must_use]
     pub fn get_option(&self, option_name: &str) -> Option<&Value> {
         self.options.get(option_name)
     }

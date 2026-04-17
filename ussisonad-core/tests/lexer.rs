@@ -36,9 +36,9 @@ mod tests {
         };
     }
 
-    macro_rules! assert_error_type {
+    macro_rules! assert_error {
         ($src:expr, $($expected:expr),* $(,)?) => {
-            let got = tokenize_error_sequence($src).into_iter().map(|e| e.kind).collect::<Vec<_>>();
+            let got = tokenize_error_sequence($src);
             let expected = vec![$($expected),*];
             assert_eq!(
                 got.len(),
@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn test_flag() {
-        assert_tokens!(";top", Token::Semicolon, Token::Str("top".to_string()));
+        assert_tokens!(";top", Token::Semicolon, Token::Ident("top".to_string()));
     }
 
     #[test]
@@ -79,8 +79,8 @@ mod tests {
         assert_tokens!(
             ";top Slay",
             Token::Semicolon,
-            Token::Str("top".to_string()),
-            Token::Str("Slay".to_string())
+            Token::Ident("top".to_string()),
+            Token::Ident("Slay".to_string())
         );
     }
 
@@ -89,7 +89,7 @@ mod tests {
         assert_tokens!(
             ";top \"Tiger Claw\"",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::Str("Tiger Claw".to_string())
         );
     }
@@ -99,9 +99,9 @@ mod tests {
         assert_tokens!(
             ";top (Slay, \"Tiger Claw\")",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::LeftParen,
-            Token::Str("Slay".to_string()),
+            Token::Ident("Slay".to_string()),
             Token::Comma,
             Token::Str("Tiger Claw".to_string()),
             Token::RightParen,
@@ -113,11 +113,11 @@ mod tests {
         assert_tokens!(
             ";top (Slay Lotragon blourgh \"Tiger Claw\")",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::LeftParen,
-            Token::Str("Slay".to_string()),
-            Token::Str("Lotragon".to_string()),
-            Token::Str("blourgh".to_string()),
+            Token::Ident("Slay".to_string()),
+            Token::Ident("Lotragon".to_string()),
+            Token::Ident("blourgh".to_string()),
             Token::Str("Tiger Claw".to_string()),
             Token::RightParen,
         );
@@ -128,7 +128,7 @@ mod tests {
         assert_tokens!(
             ";square 67",
             Token::Semicolon,
-            Token::Str("square".to_string()),
+            Token::Ident("square".to_string()),
             Token::Int("67".to_string()),
         );
     }
@@ -138,7 +138,7 @@ mod tests {
         assert_tokens!(
             ";square -69",
             Token::Semicolon,
-            Token::Str("square".to_string()),
+            Token::Ident("square".to_string()),
             Token::Int("-69".to_string()),
         );
     }
@@ -148,7 +148,7 @@ mod tests {
         assert_tokens!(
             ";square 67 + 7.27",
             Token::Semicolon,
-            Token::Str("square".to_string()),
+            Token::Ident("square".to_string()),
             Token::Int("67".to_string()),
             Token::Add,
             Token::Float("7.27".to_string()),
@@ -160,8 +160,8 @@ mod tests {
         assert_tokens!(
             ";top CreeperBro_2015",
             Token::Semicolon,
-            Token::Str("top".to_string()),
-            Token::Str("CreeperBro_2015".to_string()),
+            Token::Ident("top".to_string()),
+            Token::Ident("CreeperBro_2015".to_string()),
         );
     }
 
@@ -170,15 +170,15 @@ mod tests {
         assert_tokens!(
             ";top --limit 5 -mode standard -fc",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::SubSub,
-            Token::Str("limit".to_string()),
+            Token::Ident("limit".to_string()),
             Token::Int("5".to_string()),
             Token::Sub,
-            Token::Str("mode".to_string()),
-            Token::Str("standard".to_string()),
+            Token::Ident("mode".to_string()),
+            Token::Ident("standard".to_string()),
             Token::Sub,
-            Token::Str("fc".to_string()),
+            Token::Ident("fc".to_string()),
         );
     }
 
@@ -187,14 +187,14 @@ mod tests {
         assert_tokens!(
             ";top Slay --limit 5 --mode standard",
             Token::Semicolon,
-            Token::Str("top".to_string()),
-            Token::Str("Slay".to_string()),
+            Token::Ident("top".to_string()),
+            Token::Ident("Slay".to_string()),
             Token::SubSub,
-            Token::Str("limit".to_string()),
+            Token::Ident("limit".to_string()),
             Token::Int("5".to_string()),
             Token::SubSub,
-            Token::Str("mode".to_string()),
-            Token::Str("standard".to_string())
+            Token::Ident("mode".to_string()),
+            Token::Ident("standard".to_string())
         );
     }
 
@@ -204,10 +204,7 @@ mod tests {
         let last_quote_pos = s.rfind('\"').unwrap() + 1;
         assert_error!(
             s,
-            LexError {
-                kind: LexErrorKind::UnexpectedStringEnd,
-                location: (last_quote_pos, s.len()),
-            }
+            LexError::UnexpectedStringEnd(Loc::Slice(last_quote_pos, s.len())),
         );
     }
 
@@ -216,11 +213,11 @@ mod tests {
         assert_tokens!(
             ";top .some.value",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::Dot,
-            Token::Str("some".to_string()),
+            Token::Ident("some".to_string()),
             Token::Dot,
-            Token::Str("value".to_string()),
+            Token::Ident("value".to_string()),
         );
     }
 
@@ -228,26 +225,14 @@ mod tests {
     fn test_error_unfinished_dot_access() {
         let s = ";top . --limit 5";
         let err_idx = s.rfind('.').unwrap();
-        assert_error!(
-            s,
-            LexError {
-                kind: LexErrorKind::UnfinishedDotAccess,
-                location: (err_idx, err_idx)
-            }
-        );
+        assert_error!(s, LexError::UnfinishedDotAccess(Loc::Point(err_idx)));
     }
 
     #[test]
     fn test_error_unfinished_dot_access_at_eof() {
         let s = ";top .";
         let err_idx = s.len() - 1;
-        assert_error!(
-            s,
-            LexError {
-                kind: LexErrorKind::UnfinishedDotAccess,
-                location: (err_idx, err_idx)
-            }
-        );
+        assert_error!(s, LexError::UnfinishedDotAccess(Loc::Point(err_idx)));
     }
 
     #[test]
@@ -255,7 +240,7 @@ mod tests {
         assert_tokens!(
             ";top >> count",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Count,
         );
@@ -266,11 +251,11 @@ mod tests {
         assert_tokens!(
             ";top >> filter .bpm >= 250",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::Dot,
-            Token::Str("bpm".to_string()),
+            Token::Ident("bpm".to_string()),
             Token::Ge,
             Token::Int("250".to_string()),
         );
@@ -281,20 +266,20 @@ mod tests {
         assert_tokens!(
             ";top chocomint >> filter .bpm >= 250 >> sort .acc --ascending",
             Token::Semicolon,
-            Token::Str("top".to_string()),
-            Token::Str("chocomint".to_string()),
+            Token::Ident("top".to_string()),
+            Token::Ident("chocomint".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::Dot,
-            Token::Str("bpm".to_string()),
+            Token::Ident("bpm".to_string()),
             Token::Ge,
             Token::Int("250".to_string()),
             Token::GtGt,
             Token::Sort,
             Token::Dot,
-            Token::Str("acc".to_string()),
+            Token::Ident("acc".to_string()),
             Token::SubSub,
-            Token::Str("ascending".to_string()),
+            Token::Ident("ascending".to_string()),
         );
     }
 
@@ -303,22 +288,22 @@ mod tests {
         assert_tokens!(
             ";tops (Slay, Lotragon) ++ top mrekk --server akatsuki >> sort .bpm",
             Token::Semicolon,
-            Token::Str("tops".to_string()),
+            Token::Ident("tops".to_string()),
             Token::LeftParen,
-            Token::Str("Slay".to_string()),
+            Token::Ident("Slay".to_string()),
             Token::Comma,
-            Token::Str("Lotragon".to_string()),
+            Token::Ident("Lotragon".to_string()),
             Token::RightParen,
             Token::AddAdd,
-            Token::Str("top".to_string()),
-            Token::Str("mrekk".to_string()),
+            Token::Ident("top".to_string()),
+            Token::Ident("mrekk".to_string()),
             Token::SubSub,
-            Token::Str("server".to_string()),
-            Token::Str("akatsuki".to_string()),
+            Token::Ident("server".to_string()),
+            Token::Ident("akatsuki".to_string()),
             Token::GtGt,
             Token::Sort,
             Token::Dot,
-            Token::Str("bpm".to_string()),
+            Token::Ident("bpm".to_string()),
         );
     }
 
@@ -327,23 +312,23 @@ mod tests {
         assert_tokens!(
             ";top >> filter (.bpm >= 230 and HD in .mods) or .bpm >= 250",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::LeftParen,
             Token::Dot,
-            Token::Str("bpm".to_string()),
+            Token::Ident("bpm".to_string()),
             Token::Ge,
             Token::Int("230".to_string()),
             Token::And,
-            Token::Str("HD".to_string()),
+            Token::Ident("HD".to_string()),
             Token::In,
             Token::Dot,
-            Token::Str("mods".to_string()),
+            Token::Ident("mods".to_string()),
             Token::RightParen,
             Token::Or,
             Token::Dot,
-            Token::Str("bpm".to_string()),
+            Token::Ident("bpm".to_string()),
             Token::Ge,
             Token::Int("250".to_string()),
         );
@@ -354,7 +339,7 @@ mod tests {
         assert_tokens!(
             ";top >> filter it > 0",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::It,
@@ -368,7 +353,7 @@ mod tests {
         assert_tokens!(
             ";top >> filter self > 0",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::It,
@@ -382,7 +367,7 @@ mod tests {
         assert_tokens!(
             ";top true false",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::Bool(true),
             Token::Bool(false),
         );
@@ -393,12 +378,12 @@ mod tests {
         assert_tokens!(
             ";top >> filter not .fc",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::Not,
             Token::Dot,
-            Token::Str("fc".to_string()),
+            Token::Ident("fc".to_string()),
         );
     }
 
@@ -407,12 +392,12 @@ mod tests {
         assert_tokens!(
             ";top >> filter !.fc",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::Not,
             Token::Dot,
-            Token::Str("fc".to_string()),
+            Token::Ident("fc".to_string()),
         );
     }
 
@@ -421,13 +406,13 @@ mod tests {
         assert_tokens!(
             ";top >> filter .title contains loved",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::Dot,
-            Token::Str("title".to_string()),
+            Token::Ident("title".to_string()),
             Token::Contains,
-            Token::Str("loved".to_string()),
+            Token::Ident("loved".to_string()),
         );
     }
 
@@ -436,7 +421,7 @@ mod tests {
         assert_tokens!(
             ";top >> take 5",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Take,
             Token::Int("5".to_string()),
@@ -448,9 +433,9 @@ mod tests {
         assert_tokens!(
             ";top with recent",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::AddAdd,
-            Token::Str("recent".to_string()),
+            Token::Ident("recent".to_string()),
         );
     }
 
@@ -459,13 +444,13 @@ mod tests {
         assert_tokens!(
             ";top >> filter .status is active",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::Dot,
-            Token::Str("status".to_string()),
+            Token::Ident("status".to_string()),
             Token::Eq,
-            Token::Str("active".to_string()),
+            Token::Ident("active".to_string()),
         );
     }
 
@@ -474,11 +459,11 @@ mod tests {
         assert_tokens!(
             ";top >> filter .bpm above 200",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::Dot,
-            Token::Str("bpm".to_string()),
+            Token::Ident("bpm".to_string()),
             Token::Gt,
             Token::Int("200".to_string()),
         );
@@ -489,11 +474,11 @@ mod tests {
         assert_tokens!(
             ";top >> filter .bpm atleast 200",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::Dot,
-            Token::Str("bpm".to_string()),
+            Token::Ident("bpm".to_string()),
             Token::Ge,
             Token::Int("200".to_string()),
         );
@@ -504,11 +489,11 @@ mod tests {
         assert_tokens!(
             ";top >> filter .bpm below 300",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::Dot,
-            Token::Str("bpm".to_string()),
+            Token::Ident("bpm".to_string()),
             Token::Lt,
             Token::Int("300".to_string()),
         );
@@ -519,11 +504,11 @@ mod tests {
         assert_tokens!(
             ";top >> filter .bpm atmost 300",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::Dot,
-            Token::Str("bpm".to_string()),
+            Token::Ident("bpm".to_string()),
             Token::Le,
             Token::Int("300".to_string()),
         );
@@ -534,7 +519,7 @@ mod tests {
         assert_tokens!(
             ";top 3 * 4 % 2",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::Int("3".to_string()),
             Token::Mul,
             Token::Int("4".to_string()),
@@ -548,7 +533,7 @@ mod tests {
         assert_tokens!(
             ";top 10 / 2",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::Int("10".to_string()),
             Token::Div,
             Token::Int("2".to_string()),
@@ -560,7 +545,7 @@ mod tests {
         assert_tokens!(
             ";top 10 // 3",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::Int("10".to_string()),
             Token::DivDiv,
             Token::Int("3".to_string()),
@@ -572,11 +557,11 @@ mod tests {
         assert_tokens!(
             ";top >> filter .rank != 1",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::Dot,
-            Token::Str("rank".to_string()),
+            Token::Ident("rank".to_string()),
             Token::Ne,
             Token::Int("1".to_string()),
         );
@@ -587,22 +572,22 @@ mod tests {
         assert_tokens!(
             ";top >> filter .score < 100",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::Dot,
-            Token::Str("score".to_string()),
+            Token::Ident("score".to_string()),
             Token::Lt,
             Token::Int("100".to_string()),
         );
         assert_tokens!(
             ";top >> filter .score <= 100",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::GtGt,
             Token::Filter,
             Token::Dot,
-            Token::Str("score".to_string()),
+            Token::Ident("score".to_string()),
             Token::Le,
             Token::Int("100".to_string()),
         );
@@ -613,7 +598,7 @@ mod tests {
         assert_tokens!(
             ";top -3.14",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::Float("-3.14".to_string()),
         );
     }
@@ -623,19 +608,22 @@ mod tests {
         assert_tokens!(
             r#";top "say \"hi\"""#,
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::Str(r#"say \"hi\""#.to_string()),
         );
     }
 
     #[test]
     fn test_error_bad_string_escape() {
-        assert_error_type!(r#";top "\z""#, LexErrorKind::BadStringEscape);
+        assert_error!(r#";top "\z""#, LexError::BadStringEscape(Loc::Slice(6, 7)));
     }
 
     #[test]
     fn test_error_unrecognized_token() {
-        assert_error_type!(";top @value", LexErrorKind::UnrecognizedToken('@'));
+        assert_error!(
+            ";top @value",
+            LexError::UnrecognizedToken(Loc::Point(5), '@')
+        );
     }
 
     #[test]
@@ -643,7 +631,7 @@ mod tests {
         assert_tokens!(
             r#";top """#,
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::Str("".to_string()),
         );
     }
@@ -653,7 +641,7 @@ mod tests {
         assert_tokens!(
             r#";top "\n""#,
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::Str("\\n".to_string()),
         );
     }
@@ -663,7 +651,7 @@ mod tests {
         assert_tokens!(
             r#";top "\t""#,
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::Str("\\t".to_string()),
         );
     }
@@ -673,7 +661,7 @@ mod tests {
         assert_tokens!(
             r#";top "\\""#,
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::Str("\\\\".to_string()),
         );
     }
@@ -683,7 +671,7 @@ mod tests {
         assert_tokens!(
             ";top 0",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::Int("0".to_string()),
         );
     }
@@ -693,7 +681,7 @@ mod tests {
         assert_tokens!(
             ";top 1_000",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::Int("1000".to_string()),
         );
     }
@@ -703,7 +691,7 @@ mod tests {
         assert_tokens!(
             ";top >= 5",
             Token::Semicolon,
-            Token::Str("top".to_string()),
+            Token::Ident("top".to_string()),
             Token::Ge,
             Token::Int("5".to_string()),
         );
@@ -711,10 +699,10 @@ mod tests {
 
     #[test]
     fn test_error_multiple_unrecognized_tokens() {
-        assert_error_type!(
+        assert_error!(
             ";top @ # value",
-            LexErrorKind::UnrecognizedToken('@'),
-            LexErrorKind::UnrecognizedToken('#'),
+            LexError::UnrecognizedToken(Loc::Point(5), '@'),
+            LexError::UnrecognizedToken(Loc::Point(7), '#'),
         );
     }
 }

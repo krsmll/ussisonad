@@ -27,7 +27,7 @@ pub enum ParserError {
 impl fmt::Display for ParserError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ParserError::Lex(lex_error) => write!(f, "error lexing input: {}", lex_error),
+            ParserError::Lex(lex_error) => write!(f, "error lexing input: {lex_error}"),
             ParserError::UnexpectedToken((tok, start, _)) => {
                 write!(f, "unexpected token `{tok}` at position {start}")
             }

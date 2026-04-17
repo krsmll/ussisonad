@@ -87,9 +87,8 @@ impl Token {
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Token::Ident(s) => write!(f, "{s}"),
-            Token::Str(s) => write!(f, r#""{}""#, s),
-            Token::Int(s) | Token::Float(s) => write!(f, "{s}"),
+            Token::Str(s) => write!(f, r#""{s}""#),
+            Token::Ident(s) | Token::Int(s) | Token::Float(s) => write!(f, "{s}"),
             Token::Bool(b) => write!(f, "{}", b.clone()),
             Token::Contains => write!(f, "contains"),
             Token::Filter => write!(f, "filter"),
