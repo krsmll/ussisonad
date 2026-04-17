@@ -17,7 +17,7 @@ use crate::parser::expr::{Parser, ParserError};
 
 /// # Errors
 ///
-/// Returns `Err` if lexing or parsing fails.
+/// Returns `ParserError` if lexing or parsing fails.
 pub fn parse(input: &str) -> Result<PipelineNode, ParserError> {
     let tokenizer = Lexer::new_from_str(input);
     Parser::parse(tokenizer)
