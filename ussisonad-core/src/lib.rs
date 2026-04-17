@@ -1,21 +1,21 @@
 mod eval;
-mod lex;
-mod parse;
+mod lexer;
+mod parser;
+pub mod runtime;
 
-pub use crate::eval::evaluator::Evaluator;
-pub use crate::eval::model::{
+pub use crate::eval::evaluator::{EvalError, Evaluator};
+pub use crate::lexer::{LexError, LexErrorKind, LexResult, Lexer, Token};
+pub use crate::parser::ast::PipelineNode;
+pub use crate::runtime::{
     ArgSchema, ArgSchemaBuilder, CommandDefinition, CommandDefinitionBuilder, CommandError,
-    CommandHandler, CommandInput, ConfigError, EvalError, FieldSchema, FieldSchemaBuilder,
-    ObjectSchema, ObjectSchemaBuilder, OptionSchema, OptionSchemaBuilder, Registry,
-    RegistryBuilder, Value, ValueType,
+    CommandHandler, CommandInput, ConfigError, FieldSchema, FieldSchemaBuilder, ObjectSchema,
+    ObjectSchemaBuilder, OptionSchema, OptionSchemaBuilder, Registry, RegistryBuilder, Value,
+    ValueType,
 };
-pub use crate::lex::{LexError, LexErrorType, Token};
-pub use crate::parse::ast::PipelineNode;
-pub use crate::parse::error::ParserError;
 
-use crate::parse::parser::Parser;
+use crate::parser::expr::{Parser, ParserError};
 
 pub fn parse(input: &str) -> Result<PipelineNode, ParserError> {
-    let tokenizer = lex::make_tokenizer(input);
+    let tokenizer = Lexer::new_from_str(input);
     Parser::parse(tokenizer)
 }

@@ -1,10 +1,109 @@
-use crate::ParserError;
-use crate::eval::model::{ArgSchema, CommandInput, EvalError, Registry, Value};
-use crate::lex;
-use crate::parse::ast;
-use crate::parse::parser::Parser;
+use crate::lexer::Lexer;
+use crate::parser::ast;
+use crate::parser::expr::Parser;
+use crate::runtime::handler::CommandInput;
+use crate::runtime::registry::{ArgSchema, Registry};
+use crate::runtime::value::Value;
+use crate::{CommandError, LexError, ParserError, ValueType};
 use std::collections::HashMap;
+use std::error::Error;
+use std::fmt;
 use std::sync::Arc;
+
+#[derive(Debug)]
+pub enum EvalError {
+    UnknownCommand(String),
+    UnknownField(String),
+    TypeMismatch {
+        expected: &'static str,
+        got: &'static str,
+    },
+    NumberTypeMismatch(Vec<&'static str>),
+    UnexpectedInputType {
+        command: String,
+        expected: Vec<ValueType>,
+        got: &'static str,
+    },
+    UnexpectedArgumentType {
+        command: String,
+        expected: Vec<ValueType>,
+        got: &'static str,
+    },
+    UnexpectedReturnType {
+        command: String,
+        expected: ValueType,
+        got: &'static str,
+    },
+    NotComparable(&'static str, &'static str),
+    LexerStage(LexError),
+    ParserStage(ParserError),
+    Handler(CommandError),
+}
+
+impl fmt::Display for EvalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EvalError::UnknownCommand(name) => write!(f, "unknown command: `{name}`"),
+            EvalError::UnknownField(name) => write!(f, "unknown field: `{name}`"),
+            EvalError::TypeMismatch { expected, got } => {
+                write!(f, "type mismatch: expected `{expected}`, got `{got}`")
+            }
+            EvalError::NumberTypeMismatch(types) => write!(
+                f,
+                "cannot apply numeric operation to types: {}",
+                types.join(", ")
+            ),
+            EvalError::UnexpectedInputType {
+                command,
+                expected,
+                got,
+            } => {
+                let expected: Vec<String> = expected.iter().map(|s| format!("`{s}`")).collect();
+                write!(
+                    f,
+                    "command '{command}' received unexpected input type: expected one of [{}], got {got}",
+                    expected.join(", ")
+                )
+            }
+            EvalError::UnexpectedArgumentType {
+                command,
+                expected,
+                got,
+            } => {
+                let expected: Vec<String> = expected.iter().map(|s| format!("`{s}`")).collect();
+                write!(
+                    f,
+                    "command `{command}` received unexpected argument type: expected one of [{}], got `{got}`",
+                    expected.join(", ")
+                )
+            }
+            EvalError::UnexpectedReturnType {
+                command,
+                expected,
+                got,
+            } => write!(
+                f,
+                "command '{command}' returned unexpected type: expected `{expected}`, got `{got}`"
+            ),
+
+            EvalError::NotComparable(a, b) => {
+                write!(f, "values of type `{a}` and `{b}` are not comparable")
+            }
+            EvalError::LexerStage(reason) => write!(f, "error occurred during lexing: {}", reason),
+            EvalError::ParserStage(reason) => write!(f, "errors occurred during parsing: {reason}"),
+            EvalError::Handler(e) => write!(f, "command handler error: {e}"),
+        }
+    }
+}
+
+impl Error for EvalError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            EvalError::Handler(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 pub struct Evaluator {
     registry: Arc<Registry>,
@@ -17,13 +116,13 @@ impl Evaluator {
     }
 
     pub async fn execute(&self, src_input: &str) -> Result<Value, EvalError> {
-        let tokenizer = lex::make_tokenizer(src_input);
-        let ast = Parser::parse(tokenizer).map_err(|err| match err {
-            ParserError::LexerStage(lex_errs) => EvalError::LexerStage(lex_errs),
-            parser_err => EvalError::ParsingStage(parser_err),
-        })?;
+        let tokenizer = Lexer::new_from_str(src_input);
 
-        self.evaluate_ast(&ast).await
+        match Parser::parse(tokenizer) {
+            Ok(ast) => self.evaluate_ast(&ast).await,
+            Err(ParserError::Lex(err)) => Err(EvalError::LexerStage(err)),
+            Err(err) => Err(EvalError::ParserStage(err)),
+        }
     }
 
     pub async fn evaluate_ast(&self, node: &ast::PipelineNode) -> Result<Value, EvalError> {
@@ -56,38 +155,37 @@ impl Evaluator {
 
     fn eval_builtin(&self, cmd: &ast::BuiltinCommand, input: Value) -> Result<Value, EvalError> {
         match cmd {
-            ast::BuiltinCommand::With(expr) => self.eval_with(input, expr),
             ast::BuiltinCommand::Filter(expr) => self.eval_filter(input, expr),
             ast::BuiltinCommand::Unique(field) => self.eval_unique(input, field.as_ref()),
-            ast::BuiltinCommand::Map(expr) => self.eval_map(input, expr),
 
             ast::BuiltinCommand::Sort { field, direction } => {
                 self.eval_sort(input, field, *direction)
             }
 
             ast::BuiltinCommand::Limit(n) => {
-                let items = input.into_vector()?;
+                let items = Self::expect_vector(input)?;
                 Ok(Value::Vector(items.into_iter().take(*n as usize).collect()))
             }
 
             ast::BuiltinCommand::Count => {
-                let items = input.into_vector()?;
+                let items = Self::expect_vector(input)?;
                 Ok(Value::Int(items.len() as i64))
             }
         }
     }
 
-    fn eval_map(&self, input: Value, expr: &ast::Expr) -> Result<Value, EvalError> {
-        let items = input.into_vector()?;
-        let mapped = items
-            .into_iter()
-            .map(|item| self.eval_expr(expr, &item))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Value::Vector(mapped))
+    fn expect_vector(value: Value) -> Result<Vec<Value>, EvalError> {
+        match value {
+            Value::Vector(items) => Ok(items),
+            other => Err(EvalError::TypeMismatch {
+                expected: "list",
+                got: other.type_name(),
+            }),
+        }
     }
 
     fn eval_unique(&self, input: Value, field: Option<&ast::Expr>) -> Result<Value, EvalError> {
-        let items = input.into_vector()?;
+        let items = Self::expect_vector(input)?;
         let mut seen: Vec<Value> = Vec::new();
         let mut result = Vec::new();
         for item in items {
@@ -104,20 +202,8 @@ impl Evaluator {
         Ok(Value::Vector(result))
     }
 
-    fn eval_with(&self, input: Value, expr: &ast::Expr) -> Result<Value, EvalError> {
-        if input != Value::None {
-            return Err(EvalError::TypeMismatch {
-                expected: "None",
-                got: input.type_name(),
-            });
-        }
-
-        let expr = self.eval_expr(expr, &input)?;
-        Ok(expr)
-    }
-
     fn eval_filter(&self, input: Value, expr: &ast::Expr) -> Result<Value, EvalError> {
-        let items = input.into_vector()?;
+        let items = Self::expect_vector(input)?;
         let filtered = items
             .into_iter()
             .filter_map(|item| match self.eval_expr(expr, &item) {
@@ -139,7 +225,7 @@ impl Evaluator {
         field: &ast::Expr,
         direction: ast::SortDirection,
     ) -> Result<Value, EvalError> {
-        let items = input.into_vector()?;
+        let items = Self::expect_vector(input)?;
         let mut keyed: Vec<(Value, Value)> = items
             .into_iter()
             .map(|item| Ok((self.eval_expr(field, &item)?, item)))
@@ -195,57 +281,34 @@ impl Evaluator {
             .map(|(k, expr)| Ok((k.clone(), self.eval_expr(expr, &input)?)))
             .collect::<Result<HashMap<_, _>, EvalError>>()?;
 
-        if cmd.arg.as_ref() == Some(&ast::Expr::Each) {
-            let items = input.clone().into_vector()?;
-            let mut acc = Vec::new();
-            for arg in items {
-                Self::validate_arg(&cmd.name, def.arg.as_ref(), &arg)?;
+        let arg = match &cmd.arg {
+            None => Value::None,
+            Some(expr) => self.eval_expr(expr, &input)?,
+        };
 
-                let command_input = CommandInput {
-                    arg,
-                    flags: cmd.flags.clone(),
-                    options: options.clone(),
-                };
+        Self::validate_arg(&cmd.name, def.arg.as_ref(), &arg)?;
 
-                acc.push(
-                    def.handler
-                        .execute(input.clone(), command_input)
-                        .await
-                        .map_err(EvalError::Handler)?,
-                );
-            }
+        let command_input = CommandInput {
+            arg,
+            flags: cmd.flags.clone(),
+            options,
+        };
 
-            Ok(Value::Vector(acc))
-        } else {
-            let arg = match &cmd.arg {
-                None => Value::None,
-                Some(expr) => self.eval_expr(expr, &input)?,
-            };
+        let res = def
+            .handler
+            .execute(input, command_input)
+            .await
+            .map_err(EvalError::Handler)?;
 
-            Self::validate_arg(&cmd.name, def.arg.as_ref(), &arg)?;
-
-            let command_input = CommandInput {
-                arg,
-                flags: cmd.flags.clone(),
-                options,
-            };
-
-            let res = def
-                .handler
-                .execute(input, command_input)
-                .await
-                .map_err(EvalError::Handler)?;
-
-            if !def.returns.matches(&res) {
-                return Err(EvalError::UnexpectedReturnType {
-                    command: cmd.name.clone(),
-                    expected: def.returns.clone(),
-                    got: res.type_name(),
-                });
-            }
-
-            Ok(res)
+        if !def.returns.matches(&res) {
+            return Err(EvalError::UnexpectedReturnType {
+                command: cmd.name.clone(),
+                expected: def.returns.clone(),
+                got: res.type_name(),
+            });
         }
+
+        Ok(res)
     }
 
     fn validate_arg(
@@ -271,10 +334,6 @@ impl Evaluator {
     fn eval_expr(&self, expr: &ast::Expr, context: &Value) -> Result<Value, EvalError> {
         match expr {
             ast::Expr::It => Ok(context.clone()),
-            ast::Expr::Each => Err(EvalError::TypeMismatch {
-                expected: "expression",
-                got: "each",
-            }),
             ast::Expr::Bool(b) => Ok(Value::Bool(*b)),
             ast::Expr::Int(n) => Ok(Value::Int(*n)),
             ast::Expr::Float(f) => Ok(Value::Float(*f)),
@@ -350,7 +409,6 @@ impl Evaluator {
 
     fn eval_binary(op: &ast::BinOp, lhs: Value, rhs: Value) -> Result<Value, EvalError> {
         match op {
-            // arithmetic
             ast::BinOp::Add => Self::numeric_op(lhs, rhs, |a, b| a + b, |a, b| a + b),
             ast::BinOp::Sub => Self::numeric_op(lhs, rhs, |a, b| a - b, |a, b| a - b),
             ast::BinOp::Mul => Self::numeric_op(lhs, rhs, |a, b| a * b, |a, b| a * b),
@@ -360,7 +418,6 @@ impl Evaluator {
                 Self::numeric_op(lhs, rhs, |a, b| a / b, |a, b| (a as i64 / b as i64) as f64)
             }
 
-            // comparison
             ast::BinOp::Eq => Ok(Value::Bool(lhs == rhs)),
             ast::BinOp::Ne => Ok(Value::Bool(lhs != rhs)),
             ast::BinOp::Gt => Self::compare_values(&lhs, &rhs).map(|o| Value::Bool(o.is_gt())),
@@ -368,7 +425,6 @@ impl Evaluator {
             ast::BinOp::Ge => Self::compare_values(&lhs, &rhs).map(|o| Value::Bool(o.is_ge())),
             ast::BinOp::Le => Self::compare_values(&lhs, &rhs).map(|o| Value::Bool(o.is_le())),
 
-            // membership
             ast::BinOp::Contains => match &lhs {
                 Value::Vector(items) => Ok(Value::Bool(items.contains(&rhs))),
 
@@ -470,11 +526,10 @@ impl Evaluator {
 
 #[cfg(test)]
 mod tests {
-    use crate::eval::evaluator::Evaluator;
-    use crate::eval::model::{
-        ArgSchema, CommandDefinition, CommandError, CommandHandler, CommandInput, ConfigError,
-        EvalError, FieldSchema, ObjectSchema, Registry, Value, ValueType,
-    };
+    use crate::eval::evaluator::{EvalError, Evaluator};
+    use crate::runtime::handler::{CommandError, CommandHandler, CommandInput};
+    use crate::runtime::registry::{ArgSchema, CommandDefinition, ConfigError, Registry};
+    use crate::runtime::value::{FieldSchema, ObjectSchema, Value, ValueType};
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;

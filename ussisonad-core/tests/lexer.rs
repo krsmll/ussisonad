@@ -1,451 +1,71 @@
-use crate::lex::error::{LexError, LexErrorType};
-use crate::lex::token::Token;
-use std::collections::VecDeque;
-
-pub type Spanned = (Token, usize, usize);
-pub type LexResult = Result<Spanned, LexError>;
-
-pub fn make_tokenizer(source: &str) -> impl Iterator<Item = LexResult> + '_ {
-    let chars = source.char_indices().map(|(i, c)| (c, i));
-    Lexer::new(chars)
-}
-
-#[derive(Debug)]
-pub struct Lexer<T: Iterator<Item = (char, usize)>> {
-    chars: T,
-    pending: VecDeque<Spanned>,
-    current: Option<char>,
-    peek: Option<char>,
-    current_pos: usize,
-    peek_pos: usize,
-}
-
-impl<T> Iterator for Lexer<T>
-where
-    T: Iterator<Item = (char, usize)>,
-{
-    type Item = LexResult;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.inner_next() {
-            Ok((Token::Eof, _, _)) => None,
-            other => Some(other),
-        }
-    }
-}
-
-impl<T> Lexer<T>
-where
-    T: Iterator<Item = (char, usize)>,
-{
-    pub fn new(source: T) -> Self {
-        let mut lexer = Self {
-            chars: source,
-            pending: VecDeque::new(),
-            current: None,
-            peek: None,
-            current_pos: 0,
-            peek_pos: 0,
-        };
-        let _ = lexer.next_char();
-        let _ = lexer.next_char();
-        lexer
-    }
-
-    fn inner_next(&mut self) -> LexResult {
-        while self.pending.is_empty() {
-            self.consume()?;
-        }
-
-        Ok(self.pending.pop_front().unwrap())
-    }
-
-    fn consume(&mut self) -> Result<(), LexError> {
-        match self.current {
-            Some(c) if c.is_alphabetic() => {
-                let s = self.lex_word();
-                self.emit(s);
-            }
-            Some(c) if Self::is_number_start(c, self.peek()) => {
-                let s = self.lex_number();
-                self.emit(s);
-
-                if Some('-') == self.current && Self::is_number_start('-', self.peek) {
-                    self.emit_single_char(Token::Sub)?;
-                }
-            }
-            Some(c) => self.consume_char(c)?,
-            None => {
-                let pos = self.pos();
-                self.emit((Token::Eof, pos, pos));
-                return Ok(());
-            }
-        }
-
-        Ok(())
-    }
-
-    fn consume_char(&mut self, c: char) -> Result<(), LexError> {
-        match c {
-            '=' => self.emit_single_char(Token::Eq)?,
-            '*' => self.emit_single_char(Token::Mul)?,
-            '%' => self.emit_single_char(Token::Mod)?,
-            '(' => self.emit_single_char(Token::LeftParen)?,
-            ')' => self.emit_single_char(Token::RightParen)?,
-            '{' => self.emit_single_char(Token::LeftBrace)?,
-            '}' => self.emit_single_char(Token::RightBrace)?,
-            ',' => self.emit_single_char(Token::Comma)?,
-            ';' => self.emit_single_char(Token::Semicolon)?,
-            '/' => {
-                let tok_start = self.current_pos;
-                self.next_char();
-                if self.current == Some('/') {
-                    self.next_char();
-                    let tok_end = self.pos();
-                    self.emit((Token::DivDiv, tok_start, tok_end));
-                } else {
-                    self.emit_single_char(Token::Div)?;
-                }
-            }
-            '.' => {
-                if let Some(next) = self.peek()
-                    && !next.is_whitespace()
-                {
-                    self.emit_single_char(Token::Dot)?;
-                } else {
-                    let pos = self.pos();
-                    self.next_char();
-                    return Err(LexError {
-                        kind: LexErrorType::UnfinishedDotAccess,
-                        location: (pos, pos),
-                    });
-                }
-            }
-            '"' => {
-                self.next_char();
-                let s = self.lex_string()?;
-                self.emit(s);
-            }
-            '+' => {
-                let tok_start = self.pos();
-                self.next_char();
-                match self.current {
-                    Some('+') => {
-                        self.next_char();
-                        let tok_end = self.pos();
-                        self.emit((Token::AddAdd, tok_start, tok_end));
-                    }
-                    _ => {
-                        self.emit_single_char(Token::Add)?;
-                    }
-                }
-            }
-            '-' => {
-                let tok_start = self.pos();
-                self.next_char();
-
-                if let Some('-') = self.current {
-                    self.next_char();
-                    let tok_end = self.pos();
-                    self.emit((Token::SubSub, tok_start, tok_end));
-                } else {
-                    let tok_end = self.pos();
-                    self.emit((Token::Sub, tok_start, tok_end));
-                }
-            }
-            '!' => {
-                let tok_start = self.pos();
-                self.next_char();
-                if let Some('=') = self.current {
-                    let _ = self.next_char();
-                    let tok_end = self.pos();
-                    self.emit((Token::Ne, tok_start, tok_end));
-                } else {
-                    self.emit((Token::Not, tok_start, tok_start));
-                }
-            }
-
-            '<' => {
-                let tok_start = self.pos();
-                self.next_char();
-
-                if let Some('=') = self.current {
-                    self.next_char();
-                    let tok_end = self.pos();
-                    self.emit((Token::Le, tok_start, tok_end));
-                } else {
-                    let tok_end = self.pos();
-                    self.emit((Token::Lt, tok_start, tok_end));
-                }
-            }
-            '>' => {
-                let tok_start = self.pos();
-                self.next_char();
-                match self.current {
-                    Some('>') => {
-                        self.next_char();
-                        let tok_end = self.pos();
-                        self.emit((Token::GtGt, tok_start, tok_end));
-                    }
-                    Some('=') => {
-                        self.next_char();
-                        let tok_end = self.pos();
-                        self.emit((Token::Ge, tok_start, tok_end));
-                    }
-                    _ => {
-                        let tok_end = self.pos();
-                        self.emit((Token::Gt, tok_start, tok_end));
-                    }
-                }
-            }
-            c if c.is_whitespace() => {
-                self.next_char();
-                return Ok(());
-            }
-            c => {
-                let pos = self.pos();
-                self.next_char();
-                return Err(LexError {
-                    kind: LexErrorType::UnrecognizedToken(c),
-                    location: (pos, pos),
-                });
-            }
-        }
-
-        Ok(())
-    }
-
-    fn emit_single_char(&mut self, token: Token) -> Result<(), LexError> {
-        let tok_start = self.pos();
-
-        match self.next_char() {
-            Some(_) => {
-                self.emit((token, tok_start, self.pos()));
-                Ok(())
-            }
-            None => Err(LexError {
-                kind: LexErrorType::UnexpectedEof,
-                location: (tok_start, self.pos()),
-            }),
-        }
-    }
-
-    fn is_number_start(c: char, c1: Option<char>) -> bool {
-        match c {
-            '0'..='9' => true,
-            '-' => matches!(c1, Some('0'..='9')),
-            _ => false,
-        }
-    }
-
-    fn is_word_boundary(c: char) -> bool {
-        match c {
-            '_' => false,
-            _ => {
-                c.is_whitespace()
-                    | matches!(c, '!'..='/')
-                    | matches!(c, ':'..='@')
-                    | matches!(c, '['..='`')
-                    | matches!(c, '{'..='~')
-            }
-        }
-    }
-
-    fn lex_word(&mut self) -> Spanned {
-        let start_pos = self.pos();
-        let mut content = String::new();
-
-        loop {
-            match self.current {
-                Some(c) if Self::is_word_boundary(c) => break,
-                Some(c) => content.push(c),
-                None => break,
-            }
-            self.next_char();
-        }
-
-        match Token::str_to_keyword(content.as_str()) {
-            Some(token) => (token, start_pos, self.pos()),
-            None => (Token::Str(content), start_pos, self.pos()),
-        }
-    }
-
-    fn lex_string(&mut self) -> LexResult {
-        let start_pos = self.pos();
-        let mut content = String::new();
-
-        loop {
-            match self.next_char() {
-                Some('"') => break,
-                Some('\\') => {
-                    let slash_pos = self.pos() - 1;
-                    if let Some(c) = self.current
-                        && matches!(c, 'f' | 'n' | 't' | 'r' | '"' | '\\')
-                    {
-                        self.next_char();
-                        content.push('\\');
-                        content.push(c);
-                    } else {
-                        // skip to closing quote or eof in case of bad string escape
-                        loop {
-                            match self.next_char() {
-                                Some('"') | None => break,
-                                _ => {}
-                            }
-                        }
-                        return Err(LexError {
-                            kind: LexErrorType::BadStringEscape,
-                            location: (slash_pos, self.pos()),
-                        });
-                    }
-                }
-                Some(c) => content.push(c),
-                None => {
-                    return Err(LexError {
-                        kind: LexErrorType::UnexpectedStringEnd,
-                        location: (start_pos, start_pos),
-                    });
-                }
-            }
-        }
-
-        Ok((Token::Str(content), start_pos, self.pos()))
-    }
-
-    fn lex_number(&mut self) -> Spanned {
-        let start_pos = self.pos();
-        let mut content = String::new();
-        let mut is_decimal = false;
-        let mut is_string = false;
-
-        if self.current == Some('-') {
-            content.push('-');
-            self.next_char();
-        }
-
-        loop {
-            match self.current {
-                Some('_') => {}
-                Some('.') => {
-                    is_decimal = true;
-                    content.push('.');
-                }
-                Some(c) if c.is_alphabetic() => {
-                    is_string = true;
-                    content.push(c);
-                }
-                Some(c) if c.is_numeric() => content.push(c),
-                _ => break,
-            }
-            self.next_char();
-        }
-
-        if is_string {
-            (Token::Str(content), start_pos, self.pos())
-        } else if is_decimal {
-            (Token::Float(content), start_pos, self.pos())
-        } else {
-            (Token::Int(content), start_pos, self.pos())
-        }
-    }
-
-    fn next_char(&mut self) -> Option<char> {
-        let c = self.current;
-        let nxt = if let Some((c, loc)) = self.chars.next() {
-            self.current_pos = self.peek_pos;
-            self.peek_pos = loc;
-            Some(c)
-        } else {
-            self.current_pos = self.peek_pos;
-            self.peek_pos += 1;
-            None
-        };
-        self.current = self.peek;
-        self.peek = nxt;
-        c
-    }
-
-    fn peek(&self) -> Option<char> {
-        self.peek
-    }
-
-    fn pos(&self) -> usize {
-        self.current_pos
-    }
-
-    fn emit(&mut self, spanned: Spanned) {
-        self.pending.push_back(spanned);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::lex::error::{LexError, LexErrorType};
-    use crate::lex::lexer::make_tokenizer;
-    use crate::lex::token::Token;
+    use ussisonad_core::*;
 
     macro_rules! assert_tokens {
-   ($src:expr, $($expected:expr),* $(,)?) => {
-        let tokens = tokenize_sequence($src);
-        let expected = vec![$($expected),*];
-        assert_eq!(
-            tokens.len(),
-            expected.len(),
-            "Token count mismatch for input: {}",
-            $src
-        );
-        for (i, (token, exp)) in tokens.iter().zip(expected.iter()).enumerate() {
-            assert_eq!(token, exp, "Token mismatch at index {}: expected {:?}, got {:?}", i, exp, token);
-        }
-       ()
-    };
-}
+        ($src:expr, $($expected:expr),* $(,)?) => {
+            let tokens = tokenize_sequence($src);
+            let expected = vec![$($expected),*];
+            assert_eq!(
+                tokens.len(),
+                expected.len(),
+                "Token count mismatch for input: {}",
+                $src
+            );
+            for (i, (token, exp)) in tokens.iter().zip(expected.iter()).enumerate() {
+                assert_eq!(token, exp, "Token mismatch at index {}: expected {:?}, got {:?}", i, exp, token);
+            }
+           ()
+        };
+    }
 
     macro_rules! assert_error {
-    ($src:expr, $($expected:expr),* $(,)?) => {
-        let errors = tokenize_error_sequence($src);
-        let expected = vec![$($expected),*];
-        assert_eq!(
-            errors.len(),
-            expected.len(),
-            "Error count mismatch for input: '{}'",
-            $src
-        );
-        for (i, (error, exp)) in errors.iter().zip(expected.iter()).enumerate() {
-            assert_eq!(error, exp, "Error mismatch at index {}: expected {:?}, got {:?}", i, exp, error);
-        }
-        ()
-    };
-}
+        ($src:expr, $($expected:expr),* $(,)?) => {
+            let errors = tokenize_error_sequence($src);
+            let expected = vec![$($expected),*];
+            assert_eq!(
+                errors.len(),
+                expected.len(),
+                "Error count mismatch for input: '{}'",
+                $src
+            );
+            for (i, (error, exp)) in errors.iter().zip(expected.iter()).enumerate() {
+                assert_eq!(error, exp, "Error mismatch at index {}: expected {:?}, got {:?}", i, exp, error);
+            }
+            ()
+        };
+    }
 
     macro_rules! assert_error_type {
-    ($src:expr, $($expected:expr),* $(,)?) => {
-        let errors = tokenize_error_sequence($src);
-        let expected = vec![$($expected),*];
-        assert_eq!(
-            errors.len(),
-            expected.len(),
-            "Error count mismatch for input: '{}'",
-            $src
-        );
-        for (i, (error, exp)) in errors.iter().zip(expected.iter()).enumerate() {
-            assert_eq!(error.kind, *exp, "Error mismatch at index {}: expected {:?}, got {:?}", i, exp, error);
-        }
-        ()
-    };
-}
+        ($src:expr, $($expected:expr),* $(,)?) => {
+            let got = tokenize_error_sequence($src).into_iter().map(|e| e.kind).collect::<Vec<_>>();
+            let expected = vec![$($expected),*];
+            assert_eq!(
+                got.len(),
+                expected.len(),
+                "Error count mismatch for input: '{}'\n  expected: {:?}\n  got: {:?}",
+                $src,
+                expected,
+                got,
+            );
+            for (i, (error, exp)) in got.into_iter().zip(expected.iter()).enumerate() {
+                assert_eq!(error, *exp, "Error mismatch at index {}: expected {:?}, got {:?}", i, exp, error);
+            }
+            ()
+        };
+    }
 
     fn tokenize_sequence(source: &str) -> Vec<Token> {
-        make_tokenizer(source)
-            .map(|x| x.unwrap())
+        Lexer::new_from_str(source)
+            .map(|x| x.expect("expected all tokens to be ok"))
             .map(|x| x.0)
             .collect()
     }
 
     fn tokenize_error_sequence(source: &str) -> Vec<LexError> {
-        make_tokenizer(source)
-            .filter(|x| x.is_err())
-            .map(|x| x.unwrap_err())
+        Lexer::new_from_str(source)
+            .filter(LexResult::is_err)
+            .map(LexResult::unwrap_err)
             .collect()
     }
 
@@ -585,8 +205,8 @@ mod tests {
         assert_error!(
             s,
             LexError {
-                kind: LexErrorType::UnexpectedStringEnd,
-                location: (last_quote_pos, last_quote_pos),
+                kind: LexErrorKind::UnexpectedStringEnd,
+                location: (last_quote_pos, s.len()),
             }
         );
     }
@@ -611,7 +231,7 @@ mod tests {
         assert_error!(
             s,
             LexError {
-                kind: LexErrorType::UnfinishedDotAccess,
+                kind: LexErrorKind::UnfinishedDotAccess,
                 location: (err_idx, err_idx)
             }
         );
@@ -624,7 +244,7 @@ mod tests {
         assert_error!(
             s,
             LexError {
-                kind: LexErrorType::UnfinishedDotAccess,
+                kind: LexErrorKind::UnfinishedDotAccess,
                 location: (err_idx, err_idx)
             }
         );
@@ -681,7 +301,7 @@ mod tests {
     #[test]
     fn test_subcommand() {
         assert_tokens!(
-            ";tops (Slay, Lotragon) ++ { top mrekk --server akatsuki } >> sort .bpm",
+            ";tops (Slay, Lotragon) ++ top mrekk --server akatsuki >> sort .bpm",
             Token::Semicolon,
             Token::Str("tops".to_string()),
             Token::LeftParen,
@@ -690,13 +310,11 @@ mod tests {
             Token::Str("Lotragon".to_string()),
             Token::RightParen,
             Token::AddAdd,
-            Token::LeftBrace,
             Token::Str("top".to_string()),
             Token::Str("mrekk".to_string()),
             Token::SubSub,
             Token::Str("server".to_string()),
             Token::Str("akatsuki".to_string()),
-            Token::RightBrace,
             Token::GtGt,
             Token::Sort,
             Token::Dot,
@@ -1012,12 +630,12 @@ mod tests {
 
     #[test]
     fn test_error_bad_string_escape() {
-        assert_error_type!(r#";top "\z""#, LexErrorType::BadStringEscape);
+        assert_error_type!(r#";top "\z""#, LexErrorKind::BadStringEscape);
     }
 
     #[test]
     fn test_error_unrecognized_token() {
-        assert_error_type!(";top @value", LexErrorType::UnrecognizedToken('@'));
+        assert_error_type!(";top @value", LexErrorKind::UnrecognizedToken('@'));
     }
 
     #[test]
@@ -1095,8 +713,8 @@ mod tests {
     fn test_error_multiple_unrecognized_tokens() {
         assert_error_type!(
             ";top @ # value",
-            LexErrorType::UnrecognizedToken('@'),
-            LexErrorType::UnrecognizedToken('#'),
+            LexErrorKind::UnrecognizedToken('@'),
+            LexErrorKind::UnrecognizedToken('#'),
         );
     }
 }

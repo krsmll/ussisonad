@@ -1,73 +1,93 @@
-use crate::lex::LexError;
-use crate::lex::Token;
-use crate::lex::{LexResult, Spanned};
-use crate::parse::ast::{
+use crate::lexer::LexError;
+use crate::lexer::Token;
+use crate::lexer::{LexResult, Spanned};
+use crate::parser::ast::{
     BinOp, BuiltinCommand, Command, CustomCommand, Expr, PipelineNode, SortDirection,
 };
-use crate::parse::error::ParserError;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::iter::Peekable;
-use std::mem;
 
 pub type ParserResult = Result<PipelineNode, ParserError>;
 pub type ParsingResult = Result<Expr, ParserError>;
 
+#[derive(Debug, PartialEq, Clone)]
+pub enum ParserError {
+    Lex(LexError),
+    UnexpectedToken(Spanned),
+    UnexpectedTokenWithContext(&'static str, Spanned),
+    InvalidInt(Spanned),
+    InvalidUnsignedInt(Spanned),
+    InvalidFloat(Spanned),
+    EmptyVector((usize, usize)),
+    UnexpectedTrailingToken(Spanned),
+    UnexpectedEof,
+}
+
+impl fmt::Display for ParserError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParserError::Lex(lex_error) => write!(f, "error lexing input: {}", lex_error),
+            ParserError::UnexpectedToken((tok, start, _)) => {
+                write!(f, "unexpected token `{tok}` at position {start}")
+            }
+            ParserError::UnexpectedTokenWithContext(expected, (got, start, _)) => {
+                write!(f, "expected `{expected}`, got `{got}` at position {start}")
+            }
+            ParserError::InvalidInt((tok, start, _)) => {
+                write!(f, "invalid integer literal `{tok}` at position {start}")
+            }
+            ParserError::InvalidUnsignedInt((tok, start, _)) => {
+                write!(
+                    f,
+                    "invalid non-negative integer literal `{tok}` at position {start}"
+                )
+            }
+            ParserError::InvalidFloat((tok, start, _)) => {
+                write!(f, "invalid float literal `{tok}` at position {start}")
+            }
+            ParserError::EmptyVector((start, _)) => {
+                write!(f, "empty vector literal at position {start}")
+            }
+            ParserError::UnexpectedTrailingToken((tok, start, _)) => {
+                write!(f, "unexpected trailing token `{tok}` at position {start}")
+            }
+            ParserError::UnexpectedEof => write!(f, "unexpected end of input"),
+        }
+    }
+}
+
+impl std::error::Error for ParserError {}
+
 pub struct Parser<T: Iterator<Item = LexResult>> {
     tokens: Peekable<T>,
-    lex_errors: Vec<LexError>,
 }
 
 impl<T: Iterator<Item = LexResult>> Parser<T> {
     pub fn parse(tokens: T) -> ParserResult {
         let mut parser = Self {
             tokens: tokens.peekable(),
-            lex_errors: Vec::new(),
         };
 
-        if let Err(e) = parser.expect(Token::Semicolon) {
-            return parser.reduce_errors(e);
+        parser.expect_command_flag()?;
+
+        let node = parser.parse_pipeline()?;
+
+        match parser.next_span() {
+            Ok(Some(span)) => Err(ParserError::UnexpectedTrailingToken(span)),
+            Ok(None) => Ok(node),
+            Err(e) => Err(e),
         }
-
-        let node = match parser.parse_pipeline() {
-            Ok(v) => v,
-            Err(e) => parser.reduce_errors(e)?,
-        };
-
-        match parser.next() {
-            Some(span) => parser.reduce_errors(ParserError::UnexpectedTrailingToken(span)),
-
-            None => {
-                if parser.lex_errors.is_empty() {
-                    Ok(node)
-                } else {
-                    Err(ParserError::LexerStage(parser.lex_errors))
-                }
-            }
-        }
-    }
-
-    fn reduce_errors(&mut self, err: ParserError) -> ParserResult {
-        self.drain();
-        let lex_errors = mem::take(&mut self.lex_errors);
-        match lex_errors[..] {
-            [] => Err(err),
-            _ => Err(ParserError::LexerStage(lex_errors)),
-        }
-    }
-
-    fn drain(&mut self) {
-        // next() checks for errors produced by the lexer and pushes them to self.lex_errors
-        while self.next().is_some() {}
     }
 
     fn parse_pipeline(&mut self) -> Result<PipelineNode, ParserError> {
         let left = self.parse_command()?;
         let mut node = PipelineNode::Command(left);
 
-        while let Some(tok) = self.peek() {
+        while let Some(tok) = self.peek()? {
             match tok {
                 Token::GtGt => {
-                    self.next();
+                    self.next()?;
                     let rhs = self.parse_command()?;
                     node = PipelineNode::Pipe {
                         lhs: Box::new(node),
@@ -75,7 +95,7 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
                     };
                 }
                 Token::AddAdd => {
-                    self.next();
+                    self.next()?;
                     let rhs = self.parse_command()?;
                     node = PipelineNode::Concat {
                         lhs: Box::new(node),
@@ -90,34 +110,37 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
     }
 
     fn parse_command(&mut self) -> Result<Command, ParserError> {
-        match self.peek().ok_or(ParserError::UnexpectedEOF)? {
+        let (tok, start, end) = self.next_span()?.ok_or(ParserError::UnexpectedEof)?;
+        match tok {
             Token::Filter => self.parse_filter(),
             Token::Sort => self.parse_sort(),
             Token::Take => self.parse_take(),
             Token::Unique => self.parse_unique(),
-            Token::Count => {
-                self.next();
-                Ok(Command::Builtin(BuiltinCommand::Count))
-            }
-            Token::Str(_) => self.parse_custom_command(),
-            _ => Err(ParserError::UnexpectedToken(self.next().unwrap())),
+            Token::Ident(name) => self.parse_custom_command(name),
+            Token::Count => Ok(Command::Builtin(BuiltinCommand::Count)),
+            _ => Err(ParserError::UnexpectedToken((tok, start, end))),
         }
     }
 
-    fn parse_custom_command(&mut self) -> Result<Command, ParserError> {
-        let name = self.expect_str()?;
+    fn parse_custom_command(&mut self, name: String) -> Result<Command, ParserError> {
         let mut args = Vec::new();
         let mut flags = HashSet::new();
         let mut options = HashMap::new();
 
         loop {
-            match self.peek() {
+            match self.peek()? {
                 Some(Token::GtGt | Token::AddAdd | Token::Eof) | None => break,
                 Some(Token::SubSub) => {
-                    self.next();
-                    let key = self.expect_str()?;
-                    match self.peek() {
-                        Some(Token::Str(_) | Token::Int(_) | Token::Float(_) | Token::Bool(_)) => {
+                    self.next()?;
+                    let key = self.expect_ident()?;
+                    match self.peek()? {
+                        Some(
+                            Token::Ident(_)
+                            | Token::Str(_)
+                            | Token::Int(_)
+                            | Token::Float(_)
+                            | Token::Bool(_),
+                        ) => {
                             let val = self.parse_expr(0)?;
                             options.insert(key, val);
                         }
@@ -147,8 +170,7 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
     }
 
     fn parse_unique(&mut self) -> Result<Command, ParserError> {
-        self.next();
-        let field = match self.peek() {
+        let field = match self.peek()? {
             Some(Token::Dot) => Some(self.parse_expr(0)?),
             _ => None,
         };
@@ -156,27 +178,24 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
     }
 
     fn parse_filter(&mut self) -> Result<Command, ParserError> {
-        self.next();
         let expr = self.parse_expr(0)?;
         Ok(Command::Builtin(BuiltinCommand::Filter(expr)))
     }
 
     fn parse_sort(&mut self) -> Result<Command, ParserError> {
-        self.next();
-
         let mut field = Expr::It;
         let mut direction = SortDirection::Desc;
 
         loop {
-            match self.peek() {
+            match self.peek()? {
                 Some(Token::GtGt | Token::AddAdd | Token::Eof) | None => break,
                 Some(Token::Sub | Token::SubSub) => {
-                    self.next();
-                    direction = match self.next() {
-                        Some((Token::Str(s), _, _)) if s == "asc" => SortDirection::Asc,
-                        Some((Token::Str(s), _, _)) if s == "desc" => SortDirection::Desc,
+                    self.next()?;
+                    direction = match self.next_span()? {
+                        Some((Token::Ident(s), _, _)) if s == "asc" => SortDirection::Asc,
+                        Some((Token::Ident(s), _, _)) if s == "desc" => SortDirection::Desc,
                         Some(actual) => return Err(ParserError::UnexpectedToken(actual)),
-                        None => return Err(ParserError::UnexpectedEOF),
+                        None => return Err(ParserError::UnexpectedEof),
                     }
                 }
                 _ => field = self.parse_expr(0)?,
@@ -187,22 +206,21 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
     }
 
     fn parse_take(&mut self) -> Result<Command, ParserError> {
-        self.next();
-        let n = match self.next() {
+        let n = match self.next_span()? {
             Some((Token::Int(s), start, end)) => Self::parse_uint(s, start, end)?,
             Some(t) => return Err(ParserError::UnexpectedToken(t)),
-            None => return Err(ParserError::UnexpectedEOF),
+            None => return Err(ParserError::UnexpectedEof),
         };
 
         Ok(Command::Builtin(BuiltinCommand::Limit(n)))
     }
 
     fn parse_expr(&mut self, min_bp: u8) -> ParsingResult {
-        let (tok, start, end) = self.next().ok_or(ParserError::UnexpectedEOF)?;
+        let (tok, start, end) = self.next_span()?.ok_or(ParserError::UnexpectedEof)?;
 
         let mut lhs = match tok {
             Token::It => Expr::It,
-            Token::Str(s) => Expr::Str(s),
+            Token::Str(s) | Token::Ident(s) => Expr::Str(s),
             Token::Bool(b) => Expr::Bool(b),
             Token::Int(s) => Self::parse_int_expr((Token::Int(s), start, end))?,
             Token::Float(s) => Self::parse_float_expr((Token::Float(s), start, end))?,
@@ -216,15 +234,15 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
             tok => return Err(ParserError::UnexpectedToken((tok, start, end))),
         };
 
-        while let Some(tok) = self.peek()
+        while let Some(tok) = self.peek()?
             && let Some(op) = Self::token_to_binop(tok)
         {
-            let (left_bp, right_bp) = BinOp::bp(op);
+            let (left_bp, right_bp) = op.binding_power();
             if left_bp < min_bp {
                 break;
             }
 
-            self.next();
+            self.next()?;
 
             let rhs = self.parse_expr(right_bp)?;
 
@@ -240,11 +258,12 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
 
     fn parse_field_path(&mut self) -> ParsingResult {
         let mut segments = Vec::new();
-        segments.push(self.expect_str()?);
+        segments.push(self.expect_ident()?);
 
-        while let Some(&Token::Dot) = self.peek() {
-            self.next();
-            segments.push(self.expect_str()?);
+        while let Some(&Token::Dot) = self.peek()? {
+            self.next()?;
+            let ident = self.expect_ident()?;
+            segments.push(ident);
         }
 
         Ok(Expr::FieldPath(segments))
@@ -254,20 +273,20 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         let mut exprs: Vec<Expr> = Vec::new();
 
         loop {
-            let (tok, pos, _) = self.peek_span().ok_or(ParserError::UnexpectedEOF)?;
+            let (tok, pos, _) = self.peek_span()?.ok_or(ParserError::UnexpectedEof)?;
             match tok {
                 Token::RightParen => {
                     let expr = match exprs[..] {
                         [] => return Err(ParserError::EmptyVector((left_paren_pos, *pos))),
-                        [Expr::Binary { .. }] => exprs.pop().unwrap(),
+                        [_] => exprs.pop().unwrap(),
                         _ => Expr::Vector(exprs),
                     };
 
-                    self.next();
+                    self.next()?;
                     return Ok(expr);
                 }
                 Token::Comma => {
-                    self.next();
+                    self.next()?;
                 }
                 _ => exprs.push(self.parse_expr(0)?),
             }
@@ -325,59 +344,73 @@ impl<T: Iterator<Item = LexResult>> Parser<T> {
         }
     }
 
-    fn next(&mut self) -> Option<Spanned> {
-        match self.tokens.next()? {
-            Ok(tok) => Some(tok),
-            Err(err) => {
-                self.lex_errors.push(err);
-                None
-            }
+    fn next_span(&mut self) -> Result<Option<Spanned>, ParserError> {
+        match self.tokens.next() {
+            Some(lex_result) => lex_result.map(Some).map_err(ParserError::Lex),
+            None => Ok(None),
         }
     }
 
-    fn peek_span(&mut self) -> Option<&Spanned> {
+    fn next(&mut self) -> Result<Option<Token>, ParserError> {
+        Ok(self.next_span()?.map(|span| span.0))
+    }
+
+    fn peek_span(&mut self) -> Result<Option<&Spanned>, ParserError> {
         match self.tokens.peek() {
-            Some(Ok(tok)) => Some(tok),
-            _ => None,
+            Some(lex_result) => lex_result
+                .as_ref()
+                .map(Some)
+                .map_err(|e| ParserError::Lex(e.clone())),
+            _ => Ok(None),
         }
     }
 
-    fn peek(&mut self) -> Option<&Token> {
-        self.peek_span().map(|span| &span.0)
+    fn peek(&mut self) -> Result<Option<&Token>, ParserError> {
+        Ok(self.peek_span()?.map(|span| &span.0))
     }
 
-    fn expect(&mut self, expected: Token) -> Result<(), ParserError> {
-        match self.next() {
-            Some((tok, _, _)) if tok == expected => Ok(()),
-            Some(actual) => Err(ParserError::UnexpectedTokenWithContext(expected, actual)),
-            None => Err(ParserError::UnexpectedEOF),
+    fn expect_command_flag(&mut self) -> Result<(), ParserError> {
+        match self.next_span()? {
+            Some((Token::Semicolon, _, _)) => Ok(()),
+            Some(actual) => Err(ParserError::UnexpectedTokenWithContext(";", actual)),
+            None => Err(ParserError::UnexpectedEof),
         }
     }
 
-    fn expect_str(&mut self) -> Result<String, ParserError> {
-        match self.next() {
-            Some((Token::Str(s), _, _)) => Ok(s),
-            Some(actual) => Err(ParserError::ExpectedString(actual)),
-            None => Err(ParserError::UnexpectedEOF),
+    fn expect_ident(&mut self) -> Result<String, ParserError> {
+        match self.next_span()? {
+            Some((Token::Ident(ident), _, _)) => Ok(ident),
+            Some(actual) => Err(ParserError::UnexpectedTokenWithContext(
+                "identifier",
+                actual,
+            )),
+            None => Err(ParserError::UnexpectedEof),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::lex::make_tokenizer;
-    use crate::parse::ast::{
-        BinOp, BuiltinCommand, Command, CustomCommand, Expr, PipelineNode, SortDirection,
-    };
-    use crate::parse::error::ParserError;
-    use crate::parse::parser::Parser;
-    use std::collections::{HashMap, HashSet};
+    use super::*;
+    use crate::lexer::Lexer;
 
     macro_rules! assert_ast {
         ($src:expr, $expected:expr) => {
-            let toks = make_tokenizer($src);
+            let toks = Lexer::new_from_str($src);
             let result = Parser::parse(toks);
             assert_eq!(result, Ok($expected))
+        };
+    }
+
+    macro_rules! assert_parse_err {
+        ($src:expr, $pat:pat) => {
+            let result = Parser::parse(Lexer::new_from_str($src));
+            assert!(
+                matches!(result, Err($pat)),
+                "expected Err({}) but got {:?}",
+                stringify!($pat),
+                result
+            );
         };
     }
 
@@ -1019,42 +1052,26 @@ mod tests {
 
     #[test]
     fn test_error_no_leading_semicolon() {
-        let toks = make_tokenizer("count");
-        let result = Parser::parse(toks);
-        assert!(matches!(
-            result,
-            Err(ParserError::UnexpectedTokenWithContext(..))
-        ));
+        assert_parse_err!("count", ParserError::UnexpectedTokenWithContext(..));
     }
 
     #[test]
     fn test_error_premature_eof() {
-        let toks = make_tokenizer(";count extra");
-        let result = Parser::parse(toks);
-        assert!(matches!(
-            result,
-            Err(ParserError::UnexpectedTrailingToken(..))
-        ));
+        assert_parse_err!(";count extra", ParserError::UnexpectedTrailingToken(..));
     }
 
     #[test]
     fn test_error_unexpected_eof_in_filter() {
-        let toks = make_tokenizer(";filter");
-        let result = Parser::parse(toks);
-        assert!(matches!(result, Err(ParserError::UnexpectedEOF)));
+        assert_parse_err!(";filter", ParserError::UnexpectedEof);
     }
 
     #[test]
     fn test_error_empty_vector_in_filter() {
-        let toks = make_tokenizer(";filter ()");
-        let result = Parser::parse(toks);
-        assert!(matches!(result, Err(ParserError::EmptyVector(..))));
+        assert_parse_err!(";filter ()", ParserError::EmptyVector(..));
     }
 
     #[test]
     fn test_error_expected_string_for_option_key() {
-        let toks = make_tokenizer(";top --5");
-        let result = Parser::parse(toks);
-        assert!(matches!(result, Err(ParserError::ExpectedString(..))));
+        assert_parse_err!(";top --5", ParserError::UnexpectedTokenWithContext(..));
     }
 }

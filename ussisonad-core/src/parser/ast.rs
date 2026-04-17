@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     It,
-    Each,
     Str(String),
     Int(i64),
     Float(f64),
@@ -48,8 +47,8 @@ pub enum BinOp {
 }
 
 impl BinOp {
-    pub fn bp(bin_op: BinOp) -> (u8, u8) {
-        match bin_op {
+    pub fn binding_power(self) -> (u8, u8) {
+        match self {
             BinOp::Mul | BinOp::Div | BinOp::DivDiv | BinOp::Mod => (70, 71),
             BinOp::Add | BinOp::Sub => (60, 61),
             BinOp::In
@@ -95,7 +94,6 @@ pub struct CustomCommand {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BuiltinCommand {
-    With(Expr),
     Filter(Expr),
     Sort {
         field: Expr,
@@ -103,7 +101,6 @@ pub enum BuiltinCommand {
     },
     Count,
     Limit(u64),
-    Map(Expr),
     Unique(Option<Expr>),
 }
 
