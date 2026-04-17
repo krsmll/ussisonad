@@ -13,8 +13,8 @@ pub enum Loc {
 impl std::fmt::Display for Loc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Loc::Point(p) => write!(f, "{}", p),
-            Loc::Slice(s, p) => write!(f, "{}:{}", s, p),
+            Loc::Point(p) => write!(f, "{p}"),
+            Loc::Slice(s, p) => write!(f, "{s}:{p}"),
         }
     }
 }
@@ -35,22 +35,22 @@ impl std::fmt::Display for LexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LexError::UnrecognizedToken(span, c) => {
-                write!(f, "unrecognized token '{c}' at {:?}", span)
+                write!(f, "unrecognized token '{c}' at {span}")
             }
             LexError::UnexpectedEof(span) => {
-                write!(f, "unexpected end of input at {:?}", span)
+                write!(f, "unexpected end of input at {span}")
             }
             LexError::UnfinishedDotAccess(span) => {
-                write!(f, "expected field name after '.' at {:?}", span)
+                write!(f, "expected field name after '.' at {span}")
             }
             LexError::BadStringEscape(span) => {
-                write!(f, "invalid escape sequence at {:?}", span)
+                write!(f, "invalid escape sequence at {span}")
             }
             LexError::UnexpectedStringEnd(span) => {
-                write!(f, "unterminated string literal at {:?}", span)
+                write!(f, "unterminated string literal at {span}")
             }
             LexError::MalformedNumber(span, s) => {
-                write!(f, "malformed number '{s}' at {:?}", span)
+                write!(f, "malformed number '{s}' at {span}")
             }
         }
     }
